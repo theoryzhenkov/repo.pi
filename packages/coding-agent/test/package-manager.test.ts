@@ -49,10 +49,13 @@ describe("DefaultPackageManager", () => {
 	let settingsManager: SettingsManager;
 	let packageManager: DefaultPackageManager;
 	let previousOfflineEnv: string | undefined;
+	let previousSystemPackageRootEnv: string | undefined;
 
 	beforeEach(() => {
 		previousOfflineEnv = process.env.PI_OFFLINE;
+		previousSystemPackageRootEnv = process.env.PI_SYSTEM_PACKAGE_ROOT;
 		delete process.env.PI_OFFLINE;
+		delete process.env.PI_SYSTEM_PACKAGE_ROOT;
 		tempDir = join(tmpdir(), `pm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		agentDir = join(tempDir, "agent");
@@ -71,6 +74,11 @@ describe("DefaultPackageManager", () => {
 			delete process.env.PI_OFFLINE;
 		} else {
 			process.env.PI_OFFLINE = previousOfflineEnv;
+		}
+		if (previousSystemPackageRootEnv === undefined) {
+			delete process.env.PI_SYSTEM_PACKAGE_ROOT;
+		} else {
+			process.env.PI_SYSTEM_PACKAGE_ROOT = previousSystemPackageRootEnv;
 		}
 		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
@@ -685,6 +693,7 @@ Content`,
 			const root20 = join(tempDir, "node20", "lib", "node_modules");
 			const root22 = join(tempDir, "node22", "lib", "node_modules");
 			mkdirSync(join(root20, "@scope", "pkg"), { recursive: true });
+			writeFileSync(join(root20, "@scope", "pkg", "package.json"), JSON.stringify({ name: "@scope/pkg" }));
 
 			const runCommandSyncSpy = vi
 				.spyOn(packageManager as any, "runCommandSync")
@@ -709,6 +718,138 @@ Content`,
 
 			expect(packageManager.getInstalledPath("npm:@scope/pkg", "user")).toBeUndefined();
 			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(2, "mise", ["exec", "node@22", "--", "npm", "root", "-g"]);
+		});
+	});
+
+	describe("system package root", () => {
+		type PackageManagerInternals = {
+			installParsedSource: (...args: unknown[]) => Promise<void>;
+			runCommandSync: (...args: unknown[]) => string;
+			runCommandCapture: (...args: unknown[]) => Promise<string>;
+			runCommand: (...args: unknown[]) => Promise<void>;
+			getGlobalNpmRoot: () => string;
+		};
+
+		function getInternals(): PackageManagerInternals {
+			return packageManager as unknown as PackageManagerInternals;
+		}
+
+		function writeNpmPackage(root: string, name: string, version: string, extensionName: string): string {
+			const packageDir = join(root, name);
+			mkdirSync(join(packageDir, "extensions"), { recursive: true });
+			writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name, version }));
+			writeFileSync(join(packageDir, "extensions", extensionName), "export default function() {};");
+			return packageDir;
+		}
+
+		it("resolves configured user npm packages from PI_SYSTEM_PACKAGE_ROOT before the user root", async () => {
+			const systemRoot = join(tempDir, "system", "node_modules");
+			const packageDir = writeNpmPackage(systemRoot, "system-pkg", "1.0.0", "system.ts");
+			process.env.PI_SYSTEM_PACKAGE_ROOT = systemRoot;
+			settingsManager.setPackages(["npm:system-pkg"]);
+
+			const internals = getInternals();
+			const installParsedSourceSpy = vi.spyOn(internals, "installParsedSource");
+			const runCommandSyncSpy = vi.spyOn(internals, "runCommandSync");
+
+			const result = await packageManager.resolve();
+
+			expect(
+				result.extensions.some((r) => r.path === join(packageDir, "extensions", "system.ts") && r.enabled),
+			).toBe(true);
+			expect(installParsedSourceSpy).not.toHaveBeenCalled();
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
+			expect(packageManager.getInstalledPath("npm:system-pkg", "user")).toBe(packageDir);
+		});
+
+		it("lets PI_SYSTEM_PACKAGE_ROOT override systemPackageRoot from settings", async () => {
+			const settingsRoot = join(tempDir, "settings-system", "node_modules");
+			const envRoot = join(tempDir, "env-system", "node_modules");
+			const settingsPackageDir = writeNpmPackage(settingsRoot, "override-pkg", "1.0.0", "settings.ts");
+			const envPackageDir = writeNpmPackage(envRoot, "override-pkg", "1.0.0", "env.ts");
+			process.env.PI_SYSTEM_PACKAGE_ROOT = envRoot;
+			settingsManager = SettingsManager.inMemory({
+				systemPackageRoot: settingsRoot,
+				packages: ["npm:override-pkg"],
+			});
+			packageManager = new DefaultPackageManager({
+				cwd: tempDir,
+				agentDir,
+				settingsManager,
+			});
+
+			const result = await packageManager.resolve();
+
+			expect(
+				result.extensions.some((r) => r.path === join(envPackageDir, "extensions", "env.ts") && r.enabled),
+			).toBe(true);
+			expect(result.extensions.some((r) => r.path === join(settingsPackageDir, "extensions", "settings.ts"))).toBe(
+				false,
+			);
+		});
+
+		it("falls through to the user root when a pinned system package has the wrong version", async () => {
+			const systemRoot = join(tempDir, "system", "node_modules");
+			const userRoot = join(agentDir, "node_modules");
+			const systemPackageDir = writeNpmPackage(systemRoot, "pinned-pkg", "1.0.0", "system.ts");
+			process.env.PI_SYSTEM_PACKAGE_ROOT = systemRoot;
+			settingsManager.setPackages(["npm:pinned-pkg@2.0.0"]);
+
+			const internals = getInternals();
+			vi.spyOn(internals, "getGlobalNpmRoot").mockReturnValue(userRoot);
+			const installParsedSourceSpy = vi.spyOn(internals, "installParsedSource").mockImplementation(async () => {
+				writeNpmPackage(userRoot, "pinned-pkg", "2.0.0", "user.ts");
+			});
+
+			const result = await packageManager.resolve();
+
+			expect(installParsedSourceSpy).toHaveBeenCalledTimes(1);
+			expect(result.extensions.some((r) => r.path === join(userRoot, "pinned-pkg", "extensions", "user.ts"))).toBe(
+				true,
+			);
+			expect(result.extensions.some((r) => r.path === join(systemPackageDir, "extensions", "system.ts"))).toBe(
+				false,
+			);
+			expect(packageManager.getInstalledPath("npm:pinned-pkg@2.0.0", "user")).toBe(join(userRoot, "pinned-pkg"));
+		});
+
+		it("does not report or install updates for system-managed npm packages", async () => {
+			const systemRoot = join(tempDir, "system", "node_modules");
+			writeNpmPackage(systemRoot, "system-update-pkg", "1.0.0", "system.ts");
+			process.env.PI_SYSTEM_PACKAGE_ROOT = systemRoot;
+			settingsManager.setPackages(["npm:system-update-pkg"]);
+
+			const internals = getInternals();
+			const runCommandCaptureSpy = vi.spyOn(internals, "runCommandCapture").mockResolvedValue('"2.0.0"');
+			const runCommandSpy = vi.spyOn(internals, "runCommand").mockResolvedValue(undefined);
+
+			await packageManager.update();
+			const updates = await packageManager.checkForAvailableUpdates();
+
+			expect(updates).toEqual([]);
+			expect(runCommandCaptureSpy).not.toHaveBeenCalled();
+			expect(runCommandSpy).not.toHaveBeenCalled();
+		});
+
+		it("ignores an invalid system package root and resolves from the user root", async () => {
+			const invalidRoot = join(tempDir, "missing-system-root");
+			const userRoot = join(agentDir, "node_modules");
+			const userPackageDir = writeNpmPackage(userRoot, "fallback-pkg", "1.0.0", "user.ts");
+			process.env.PI_SYSTEM_PACKAGE_ROOT = invalidRoot;
+			settingsManager.setPackages(["npm:fallback-pkg"]);
+
+			const internals = getInternals();
+			vi.spyOn(internals, "getGlobalNpmRoot").mockReturnValue(userRoot);
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const installParsedSourceSpy = vi.spyOn(internals, "installParsedSource");
+
+			const result = await packageManager.resolve();
+
+			expect(
+				result.extensions.some((r) => r.path === join(userPackageDir, "extensions", "user.ts") && r.enabled),
+			).toBe(true);
+			expect(installParsedSourceSpy).not.toHaveBeenCalled();
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ignoring system package root"));
 		});
 	});
 

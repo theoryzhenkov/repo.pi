@@ -131,6 +131,19 @@ type ParsedSource = NpmSource | GitSource | LocalSource;
 
 type InstalledSourceScope = Exclude<SourceScope, "temporary">;
 
+type NpmRootKind = "system" | "user" | "project" | "temporary";
+
+interface NpmRoot {
+	kind: NpmRootKind;
+	path: string;
+	writable: boolean;
+}
+
+interface InstalledNpmPackage {
+	path: string;
+	root: NpmRoot;
+}
+
 interface ConfiguredUpdateSource {
 	source: string;
 	scope: InstalledSourceScope;
@@ -760,6 +773,9 @@ export class DefaultPackageManager implements PackageManager {
 	private settingsManager: SettingsManager;
 	private globalNpmRoot: string | undefined;
 	private globalNpmRootCommandKey: string | undefined;
+	private systemPackageRoot: string | undefined;
+	private systemPackageRootConfigKey: string | undefined;
+	private warnedSystemPackageRoots = new Set<string>();
 	private progressCallback: ProgressCallback | undefined;
 
 	constructor(options: PackageManagerOptions) {
@@ -812,8 +828,7 @@ export class DefaultPackageManager implements PackageManager {
 	getInstalledPath(source: string, scope: "user" | "project"): string | undefined {
 		const parsed = this.parseSource(source);
 		if (parsed.type === "npm") {
-			const path = this.getNpmInstallPath(parsed, scope);
-			return existsSync(path) ? path : undefined;
+			return this.findInstalledNpmPath(parsed, scope)?.path;
 		}
 		if (parsed.type === "git") {
 			const path = this.getGitInstallPath(parsed, scope);
@@ -1084,8 +1099,15 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async shouldUpdateNpmSource(source: NpmSource, scope: InstalledSourceScope): Promise<boolean> {
-		const installedPath = this.getNpmInstallPath(source, scope);
-		const installedVersion = existsSync(installedPath) ? this.getInstalledNpmVersion(installedPath) : undefined;
+		const installedPackage = this.findInstalledNpmPath(source, scope);
+		if (!installedPackage) {
+			return true;
+		}
+		if (!installedPackage.root.writable) {
+			return false;
+		}
+
+		const installedVersion = this.getInstalledNpmVersion(installedPackage.path);
 		if (!installedVersion) {
 			return true;
 		}
@@ -1152,11 +1174,11 @@ export class DefaultPackageManager implements PackageManager {
 				}
 
 				if (parsed.type === "npm") {
-					const installedPath = this.getNpmInstallPath(parsed, entry.scope);
-					if (!existsSync(installedPath)) {
+					const installedPackage = this.findInstalledNpmPath(parsed, entry.scope);
+					if (!installedPackage || !installedPackage.root.writable) {
 						return undefined;
 					}
-					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPath);
+					const hasUpdate = await this.npmHasAvailableUpdate(parsed, installedPackage.path);
 					if (!hasUpdate) {
 						return undefined;
 					}
@@ -1221,16 +1243,15 @@ export class DefaultPackageManager implements PackageManager {
 			};
 
 			if (parsed.type === "npm") {
-				const installedPath = this.getNpmInstallPath(parsed, scope);
-				const needsInstall =
-					!existsSync(installedPath) ||
-					(parsed.pinned && !(await this.installedNpmMatchesPinnedVersion(parsed, installedPath)));
-				if (needsInstall) {
+				let installedPackage = this.findInstalledNpmPath(parsed, scope);
+				if (!installedPackage) {
 					const installed = await installMissing();
 					if (!installed) continue;
+					installedPackage = this.findInstalledNpmPath(parsed, scope);
+					if (!installedPackage) continue;
 				}
-				metadata.baseDir = installedPath;
-				this.collectPackageResources(installedPath, accumulator, filter, metadata);
+				metadata.baseDir = installedPackage.path;
+				this.collectPackageResources(installedPackage.path, accumulator, filter, metadata);
 				continue;
 			}
 
@@ -1392,7 +1413,7 @@ export class DefaultPackageManager implements PackageManager {
 		return { type: "local", path: source };
 	}
 
-	private async installedNpmMatchesPinnedVersion(source: NpmSource, installedPath: string): Promise<boolean> {
+	private installedNpmMatchesPinnedVersion(source: NpmSource, installedPath: string): boolean {
 		const installedVersion = this.getInstalledNpmVersion(installedPath);
 		if (!installedVersion) {
 			return false;
@@ -1838,6 +1859,96 @@ export class DefaultPackageManager implements PackageManager {
 		return join(this.getGlobalNpmRoot(), "..");
 	}
 
+	private resolveConfiguredPath(input: string): string {
+		const trimmed = input.trim();
+		if (trimmed === "~") return getHomeDir();
+		if (trimmed.startsWith("~/")) return join(getHomeDir(), trimmed.slice(2));
+		if (trimmed.startsWith("~")) return join(getHomeDir(), trimmed.slice(1));
+		return resolve(this.cwd, trimmed);
+	}
+
+	private getSystemPackageRoot(): string | undefined {
+		const envRoot = getEnv().PI_SYSTEM_PACKAGE_ROOT?.trim();
+		const settingsRoot = this.settingsManager.getSystemPackageRoot()?.trim();
+		const configuredRoot = envRoot || settingsRoot;
+		const configKey = configuredRoot ?? "";
+		if (this.systemPackageRootConfigKey === configKey) {
+			return this.systemPackageRoot;
+		}
+
+		this.systemPackageRootConfigKey = configKey;
+		this.systemPackageRoot = undefined;
+		if (!configuredRoot) {
+			return undefined;
+		}
+
+		const root = this.resolveConfiguredPath(configuredRoot);
+		if (!this.isValidSystemPackageRoot(root)) {
+			return undefined;
+		}
+
+		this.systemPackageRoot = root;
+		return root;
+	}
+
+	private isValidSystemPackageRoot(root: string): boolean {
+		try {
+			if (!existsSync(root)) {
+				this.warnInvalidSystemPackageRoot(root, "path does not exist");
+				return false;
+			}
+			const stats = statSync(root);
+			if (!stats.isDirectory()) {
+				this.warnInvalidSystemPackageRoot(root, "path is not a directory");
+				return false;
+			}
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.warnInvalidSystemPackageRoot(root, message);
+			return false;
+		}
+	}
+
+	private warnInvalidSystemPackageRoot(root: string, reason: string): void {
+		if (this.warnedSystemPackageRoots.has(root)) {
+			return;
+		}
+		this.warnedSystemPackageRoots.add(root);
+		console.warn(`Warning: ignoring system package root ${root}: ${reason}`);
+	}
+
+	private *getNpmReadRoots(scope: SourceScope): Generator<NpmRoot> {
+		if (scope === "temporary") {
+			yield { kind: "temporary", path: join(this.getTemporaryDir("npm"), "node_modules"), writable: true };
+			return;
+		}
+		if (scope === "project") {
+			yield { kind: "project", path: join(this.cwd, CONFIG_DIR_NAME, "npm", "node_modules"), writable: true };
+			return;
+		}
+
+		const systemRoot = this.getSystemPackageRoot();
+		if (systemRoot) {
+			yield { kind: "system", path: systemRoot, writable: false };
+		}
+		yield { kind: "user", path: this.getGlobalNpmRoot(), writable: true };
+	}
+
+	private findInstalledNpmPath(source: NpmSource, scope: SourceScope): InstalledNpmPackage | undefined {
+		for (const root of this.getNpmReadRoots(scope)) {
+			const packagePath = join(root.path, source.name);
+			if (!existsSync(packagePath) || !existsSync(join(packagePath, "package.json"))) {
+				continue;
+			}
+			if (source.pinned && !this.installedNpmMatchesPinnedVersion(source, packagePath)) {
+				continue;
+			}
+			return { path: packagePath, root };
+		}
+		return undefined;
+	}
+
 	private getGlobalNpmRoot(): string {
 		const npmCommand = this.getNpmCommand();
 		const commandKey = [npmCommand.command, ...npmCommand.args].join("\0");
@@ -1853,16 +1964,6 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		this.globalNpmRootCommandKey = commandKey;
 		return this.globalNpmRoot;
-	}
-
-	private getNpmInstallPath(source: NpmSource, scope: SourceScope): string {
-		if (scope === "temporary") {
-			return join(this.getTemporaryDir("npm"), "node_modules", source.name);
-		}
-		if (scope === "project") {
-			return join(this.cwd, CONFIG_DIR_NAME, "npm", "node_modules", source.name);
-		}
-		return join(this.getGlobalNpmRoot(), source.name);
 	}
 
 	private getGitInstallPath(source: GitSource, scope: SourceScope): string {

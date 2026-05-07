@@ -59,6 +59,7 @@ npm:pkg
 - Versioned specs are pinned and skipped by package updates (`pi update`, `pi update --extensions`).
 - Global installs use `npm install -g`.
 - Project installs go under `.pi/npm/`.
+- Distro or Nix-managed installs can set `PI_SYSTEM_PACKAGE_ROOT` or `systemPackageRoot` in `settings.json` to an optional read-only `node_modules` root. Global npm package resolution checks this root before the writable user global root, but installs, removes, and version-mismatch installs still write only to the user root.
 - Set `npmCommand` in `settings.json` to pin npm package lookup and install operations to a specific wrapper command such as `mise` or `asdf`.
 
 Example:

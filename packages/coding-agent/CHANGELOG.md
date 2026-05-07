@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PI_SYSTEM_PACKAGE_ROOT` / `systemPackageRoot` support for resolving global npm pi packages from an optional read-only system `node_modules` root before falling back to the writable user root.
+
 ## [0.74.0] - 2026-05-07
 
 ### Changed

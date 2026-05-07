@@ -90,6 +90,7 @@ export interface Settings {
 	quietStartup?: boolean;
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
+	systemPackageRoot?: string; // Optional read-only node_modules root for distro-managed global npm packages
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
@@ -782,6 +783,10 @@ export class SettingsManager {
 		this.globalSettings.npmCommand = command ? [...command] : undefined;
 		this.markModified("npmCommand");
 		this.save();
+	}
+
+	getSystemPackageRoot(): string | undefined {
+		return this.settings.systemPackageRoot;
 	}
 
 	getCollapseChangelog(): boolean {
