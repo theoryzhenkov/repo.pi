@@ -24,6 +24,8 @@ export {
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
 } from "./core/auth-storage.js";
+export { createLocalExecutionContext, LocalToolBackend } from "./core/backends/local.js";
+export { createStdioExecutionContext, StdioBridgeBackend } from "./core/backends/stdio.js";
 // Compaction
 export {
 	type BranchPreparation,
@@ -48,6 +50,7 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
+export type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "./core/execution-context.js";
 // Extension system
 export type {
 	AgentEndEvent,

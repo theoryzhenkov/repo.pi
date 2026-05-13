@@ -43,6 +43,21 @@ export interface GrepToolDetails {
 	linesTruncated?: boolean;
 }
 
+export interface GrepRequest {
+	pattern: string;
+	path: string;
+	glob?: string;
+	ignoreCase?: boolean;
+	literal?: boolean;
+	context?: number;
+	limit: number;
+}
+
+export interface GrepResult {
+	output: string;
+	details?: GrepToolDetails;
+}
+
 /**
  * Pluggable operations for the grep tool.
  * Override these to delegate search to remote systems (for example SSH).
@@ -52,6 +67,8 @@ export interface GrepOperations {
 	isDirectory: (absolutePath: string) => Promise<boolean> | boolean;
 	/** Read file contents for context lines */
 	readFile: (absolutePath: string) => Promise<string> | string;
+	/** Execute a complete grep operation without spawning local search tools. */
+	grep?: (request: GrepRequest) => Promise<GrepResult> | GrepResult;
 }
 
 const defaultGrepOperations: GrepOperations = {
@@ -168,14 +185,36 @@ export function createGrepToolDefinition(
 
 				(async () => {
 					try {
+						const searchPath = resolveToCwd(searchDir || ".", cwd);
+						const ops = customOps ?? defaultGrepOperations;
+						const contextValue = context && context > 0 ? context : 0;
+						const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
+
+						if (customOps?.grep) {
+							const result = await customOps.grep({
+								pattern,
+								path: searchPath,
+								glob,
+								ignoreCase,
+								literal,
+								context: contextValue,
+								limit: effectiveLimit,
+							});
+							settle(() =>
+								resolve({
+									content: [{ type: "text", text: result.output }],
+									details: result.details,
+								}),
+							);
+							return;
+						}
+
 						const rgPath = await ensureTool("rg", true);
 						if (!rgPath) {
 							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
 							return;
 						}
 
-						const searchPath = resolveToCwd(searchDir || ".", cwd);
-						const ops = customOps ?? defaultGrepOperations;
 						let isDirectory: boolean;
 						try {
 							isDirectory = await ops.isDirectory(searchPath);
@@ -184,8 +223,6 @@ export function createGrepToolDefinition(
 							return;
 						}
 
-						const contextValue = context && context > 0 ? context : 0;
-						const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
 						const formatPath = (filePath: string): string => {
 							if (isDirectory) {
 								const relative = path.relative(searchPath, filePath);
