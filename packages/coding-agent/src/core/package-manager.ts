@@ -1,4 +1,4 @@
-import { type ChildProcess, type ChildProcessByStdio, spawn, spawnSync } from "node:child_process";
+import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -28,7 +28,7 @@ import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME } from "../config.js";
-import { shouldUseWindowsShell } from "../utils/child-process.js";
+import { spawnProcess, spawnProcessSync } from "../utils/child-process.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import { isStdoutTakenOver } from "./output-guard.js";
@@ -1106,6 +1106,9 @@ export class DefaultPackageManager implements PackageManager {
 		if (!installedPackage.root.writable) {
 			return false;
 		}
+		if (scope === "user" && installedPackage.path !== this.getUserManagedNpmPackagePath(source)) {
+			return true;
+		}
 
 		const installedVersion = this.getInstalledNpmVersion(installedPackage.path);
 		if (!installedVersion) {
@@ -1136,13 +1139,9 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async installNpmBatch(specs: string[], scope: InstalledSourceScope): Promise<void> {
-		if (scope === "user") {
-			await this.runNpmCommand(["install", "-g", ...specs]);
-			return;
-		}
 		const installRoot = this.getNpmInstallRoot(scope, false);
 		this.ensureNpmProject(installRoot);
-		await this.runNpmCommand(["install", ...specs, "--prefix", installRoot]);
+		await this.runNpmCommand(this.getNpmInstallArgs(specs, installRoot));
 	}
 
 	async checkForAvailableUpdates(): Promise<PackageUpdate[]> {
@@ -1689,6 +1688,14 @@ export class DefaultPackageManager implements PackageManager {
 		return { command, args };
 	}
 
+	private getPackageManagerName(): string {
+		const npmCommand = this.getNpmCommand();
+		const commandParts = [npmCommand.command, ...npmCommand.args];
+		const separatorIndex = commandParts.lastIndexOf("--");
+		const packageManagerCommand = separatorIndex >= 0 ? commandParts[separatorIndex + 1] : npmCommand.command;
+		return packageManagerCommand ? basename(packageManagerCommand).replace(/\.(cmd|exe)$/i, "") : "";
+	}
+
 	private async runNpmCommand(args: string[], options?: { cwd?: string }): Promise<void> {
 		const npmCommand = this.getNpmCommand();
 		await this.runCommand(npmCommand.command, [...npmCommand.args, ...args], options);
@@ -1707,23 +1714,30 @@ export class DefaultPackageManager implements PackageManager {
 		return this.runCommandSync(npmCommand.command, [...npmCommand.args, ...args]);
 	}
 
-	private async installNpm(source: NpmSource, scope: SourceScope, temporary: boolean): Promise<void> {
-		if (scope === "user" && !temporary) {
-			await this.runNpmCommand(["install", "-g", source.spec]);
-			return;
+	private getNpmInstallArgs(specs: string[], installRoot: string): string[] {
+		const packageManagerName = this.getPackageManagerName();
+		if (packageManagerName === "bun") {
+			return ["install", ...specs, "--cwd", installRoot];
 		}
+		if (packageManagerName === "pnpm") {
+			return ["install", ...specs, "--prefix", installRoot, "--config.strict-dep-builds=false"];
+		}
+		return ["install", ...specs, "--prefix", installRoot];
+	}
+
+	private async installNpm(source: NpmSource, scope: SourceScope, temporary: boolean): Promise<void> {
 		const installRoot = this.getNpmInstallRoot(scope, temporary);
 		this.ensureNpmProject(installRoot);
-		await this.runNpmCommand(["install", source.spec, "--prefix", installRoot]);
+		await this.runNpmCommand(this.getNpmInstallArgs([source.spec], installRoot));
 	}
 
 	private async uninstallNpm(source: NpmSource, scope: SourceScope): Promise<void> {
-		if (scope === "user") {
-			await this.runNpmCommand(["uninstall", "-g", source.name]);
-			return;
-		}
 		const installRoot = this.getNpmInstallRoot(scope, false);
 		if (!existsSync(installRoot)) {
+			return;
+		}
+		if (this.getPackageManagerName() === "bun") {
+			await this.runNpmCommand(["uninstall", source.name, "--cwd", installRoot]);
 			return;
 		}
 		await this.runNpmCommand(["uninstall", source.name, "--prefix", installRoot]);
@@ -1856,7 +1870,7 @@ export class DefaultPackageManager implements PackageManager {
 		if (scope === "project") {
 			return join(this.cwd, CONFIG_DIR_NAME, "npm");
 		}
-		return join(this.getGlobalNpmRoot(), "..");
+		return join(this.agentDir, "npm");
 	}
 
 	private resolveConfiguredPath(input: string): string {
@@ -1918,6 +1932,28 @@ export class DefaultPackageManager implements PackageManager {
 		console.warn(`Warning: ignoring system package root ${root}: ${reason}`);
 	}
 
+	private getPnpmGlobalPackagePath(packageName: string): string | undefined {
+		if (this.getPackageManagerName() !== "pnpm") {
+			return undefined;
+		}
+
+		const output = this.runNpmCommandSync(["list", "-g", "--depth", "0", "--json"]);
+		const entries = JSON.parse(output) as Array<{ dependencies?: Record<string, { path?: string }> }>;
+		for (const entry of entries) {
+			const path = entry.dependencies?.[packageName]?.path;
+			if (path) return path;
+		}
+		return undefined;
+	}
+
+	private getLegacyGlobalNpmInstallPath(source: NpmSource): string | undefined {
+		try {
+			return this.getPnpmGlobalPackagePath(source.name) ?? join(this.getGlobalNpmRoot(), source.name);
+		} catch {
+			return undefined;
+		}
+	}
+
 	private *getNpmReadRoots(scope: SourceScope): Generator<NpmRoot> {
 		if (scope === "temporary") {
 			yield { kind: "temporary", path: join(this.getTemporaryDir("npm"), "node_modules"), writable: true };
@@ -1932,21 +1968,50 @@ export class DefaultPackageManager implements PackageManager {
 		if (systemRoot) {
 			yield { kind: "system", path: systemRoot, writable: false };
 		}
-		yield { kind: "user", path: this.getGlobalNpmRoot(), writable: true };
+		yield { kind: "user", path: this.getUserManagedNpmRoot(), writable: true };
 	}
 
 	private findInstalledNpmPath(source: NpmSource, scope: SourceScope): InstalledNpmPackage | undefined {
 		for (const root of this.getNpmReadRoots(scope)) {
 			const packagePath = join(root.path, source.name);
-			if (!existsSync(packagePath) || !existsSync(join(packagePath, "package.json"))) {
-				continue;
+			if (this.npmPackageMatches(source, packagePath)) {
+				return { path: packagePath, root };
 			}
-			if (source.pinned && !this.installedNpmMatchesPinnedVersion(source, packagePath)) {
-				continue;
-			}
-			return { path: packagePath, root };
 		}
+
+		if (scope === "user") {
+			const legacyPath = this.getLegacyGlobalNpmInstallPath(source);
+			if (legacyPath && this.legacyNpmPackageMatches(source, legacyPath)) {
+				return { path: legacyPath, root: { kind: "user", path: dirname(legacyPath), writable: true } };
+			}
+		}
+
 		return undefined;
+	}
+
+	private npmPackageMatches(source: NpmSource, packagePath: string): boolean {
+		if (!existsSync(packagePath) || !existsSync(join(packagePath, "package.json"))) {
+			return false;
+		}
+		return !source.pinned || this.installedNpmMatchesPinnedVersion(source, packagePath);
+	}
+
+	private legacyNpmPackageMatches(source: NpmSource, packagePath: string): boolean {
+		if (!existsSync(packagePath)) {
+			return false;
+		}
+		if (!existsSync(join(packagePath, "package.json"))) {
+			return !source.pinned;
+		}
+		return !source.pinned || this.installedNpmMatchesPinnedVersion(source, packagePath);
+	}
+
+	private getUserManagedNpmRoot(): string {
+		return join(this.agentDir, "npm", "node_modules");
+	}
+
+	private getUserManagedNpmPackagePath(source: NpmSource): string {
+		return join(this.getUserManagedNpmRoot(), source.name);
 	}
 
 	private getGlobalNpmRoot(): string {
@@ -1955,8 +2020,7 @@ export class DefaultPackageManager implements PackageManager {
 		if (this.globalNpmRoot && this.globalNpmRootCommandKey === commandKey) {
 			return this.globalNpmRoot;
 		}
-		const isBunPackageManager = npmCommand.command === "bun";
-		if (isBunPackageManager) {
+		if (this.getPackageManagerName() === "bun") {
 			const binDir = this.runNpmCommandSync(["pm", "bin", "-g"]).trim();
 			this.globalNpmRoot = join(dirname(binDir), "install", "global", "node_modules");
 		} else {
@@ -2283,6 +2347,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		};
 
+		// Project extensions from .pi/
 		addResources(
 			"extensions",
 			collectAutoExtensionEntries(projectDirs.extensions),
@@ -2290,16 +2355,32 @@ export class DefaultPackageManager implements PackageManager {
 			projectOverrides.extensions,
 			projectBaseDir,
 		);
+
+		// Project skills from .pi/
 		addResources(
 			"skills",
-			[
-				...collectAutoSkillEntries(projectDirs.skills, "pi"),
-				...projectAgentsSkillDirs.flatMap((dir) => collectAutoSkillEntries(dir, "agents")),
-			],
+			collectAutoSkillEntries(projectDirs.skills, "pi"),
 			projectMetadata,
 			projectOverrides.skills,
 			projectBaseDir,
 		);
+
+		// Project skills from .agents/ (each with its own baseDir)
+		for (const agentsSkillsDir of projectAgentsSkillDirs) {
+			const agentsBaseDir = dirname(agentsSkillsDir); // the .agents directory
+			const agentsMetadata: PathMetadata = {
+				...projectMetadata,
+				baseDir: agentsBaseDir,
+			};
+			addResources(
+				"skills",
+				collectAutoSkillEntries(agentsSkillsDir, "agents"),
+				agentsMetadata,
+				projectOverrides.skills,
+				agentsBaseDir,
+			);
+		}
+
 		addResources(
 			"prompts",
 			collectAutoPromptEntries(projectDirs.prompts),
@@ -2315,6 +2396,7 @@ export class DefaultPackageManager implements PackageManager {
 			projectBaseDir,
 		);
 
+		// User extensions from ~/.pi/agent/
 		addResources(
 			"extensions",
 			collectAutoExtensionEntries(userDirs.extensions),
@@ -2322,13 +2404,30 @@ export class DefaultPackageManager implements PackageManager {
 			userOverrides.extensions,
 			globalBaseDir,
 		);
+
+		// User skills from ~/.pi/agent/
 		addResources(
 			"skills",
-			[...collectAutoSkillEntries(userDirs.skills, "pi"), ...collectAutoSkillEntries(userAgentsSkillsDir, "agents")],
+			collectAutoSkillEntries(userDirs.skills, "pi"),
 			userMetadata,
 			userOverrides.skills,
 			globalBaseDir,
 		);
+
+		// User skills from ~/.agents/ (with its own baseDir)
+		const userAgentsBaseDir = dirname(userAgentsSkillsDir);
+		const userAgentsMetadata: PathMetadata = {
+			...userMetadata,
+			baseDir: userAgentsBaseDir,
+		};
+		addResources(
+			"skills",
+			collectAutoSkillEntries(userAgentsSkillsDir, "agents"),
+			userAgentsMetadata,
+			userOverrides.skills,
+			userAgentsBaseDir,
+		);
+
 		addResources(
 			"prompts",
 			collectAutoPromptEntries(userDirs.prompts),
@@ -2432,11 +2531,11 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private spawnCommand(command: string, args: string[], options?: { cwd?: string }): ChildProcess {
-		return spawn(command, args, {
+		const env = getEnv();
+		return spawnProcess(command, args, {
 			cwd: options?.cwd,
 			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
-			shell: shouldUseWindowsShell(command),
-			env: getEnv(),
+			env,
 		});
 	}
 
@@ -2446,11 +2545,11 @@ export class DefaultPackageManager implements PackageManager {
 		options?: { cwd?: string; env?: Record<string, string> },
 	): ChildProcessByStdio<null, Readable, Readable> {
 		const baseEnv = getEnv();
-		return spawn(command, args, {
+		const env = options?.env ? { ...baseEnv, ...options.env } : baseEnv;
+		return spawnProcess(command, args, {
 			cwd: options?.cwd,
 			stdio: ["ignore", "pipe", "pipe"],
-			shell: shouldUseWindowsShell(command),
-			env: options?.env ? { ...baseEnv, ...options.env } : baseEnv,
+			env,
 		});
 	}
 
@@ -2513,11 +2612,11 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private runCommandSync(command: string, args: string[]): string {
-		const result = spawnSync(command, args, {
+		const env = getEnv();
+		const result = spawnProcessSync(command, args, {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",
-			shell: shouldUseWindowsShell(command),
-			env: getEnv(),
+			env,
 		});
 		if (result.error || result.status !== 0) {
 			throw new Error(

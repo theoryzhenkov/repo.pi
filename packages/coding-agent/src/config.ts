@@ -1,9 +1,8 @@
-import { spawnSync } from "child_process";
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
-import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { spawnProcessSync } from "./utils/child-process.js";
 
 // =============================================================================
 // Package Detection
@@ -81,24 +80,19 @@ export function detectInstallMethod(): InstallMethod {
 	return "unknown";
 }
 
-function getInferredNpmInstall(packageName: string): { root: string; prefix: string } | undefined {
+function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
 	const packageDir = getPackageDir();
 	const path = process.platform === "win32" || packageDir.includes("\\") ? win32 : { basename, dirname };
-	const [scope, name] = packageName.split("/");
+	const parent = path.dirname(packageDir);
 	let root: string | undefined;
-	if (
-		name &&
-		scope?.startsWith("@") &&
-		path.basename(path.dirname(packageDir)) === scope &&
-		path.basename(packageDir) === name
-	) {
-		root = path.dirname(path.dirname(packageDir));
-	} else if (!name && path.basename(packageDir) === packageName) {
-		root = path.dirname(packageDir);
+	if (path.basename(parent).startsWith("@") && path.basename(path.dirname(parent)) === "node_modules") {
+		root = path.dirname(parent);
+	} else if (path.basename(parent) === "node_modules") {
+		root = parent;
 	}
-	if (!root || path.basename(root) !== "node_modules") return undefined;
-	const parent = path.dirname(root);
-	if (path.basename(parent) === "lib") return { root, prefix: path.dirname(parent) };
+	if (!root) return undefined;
+	const rootParent = path.dirname(root);
+	if (path.basename(rootParent) === "lib") return { root, prefix: path.dirname(rootParent) };
 	// Windows global npm prefixes use `<prefix>\\node_modules`, which is
 	// indistinguishable from local project installs by path shape alone. Do not
 	// infer unsupported Windows custom prefixes without `npm root -g` evidence.
@@ -137,7 +131,7 @@ function getSelfUpdateCommandForMethod(
 			);
 		case "npm": {
 			const [command = "npm", ...npmArgs] = npmCommand ?? [];
-			const inferred = npmCommand?.length ? undefined : getInferredNpmInstall(installedPackageName);
+			const inferred = npmCommand?.length ? undefined : getInferredNpmInstall();
 			const prefixArgs = [...npmArgs, ...(inferred ? ["--prefix", inferred.prefix] : [])];
 			const installStep = makeSelfUpdateCommandStep(command, [...prefixArgs, "install", "-g", updatePackageName]);
 			const uninstallStep =
@@ -156,10 +150,9 @@ function readCommandOutput(
 	args: string[],
 	options: { requireSuccess?: boolean } = {},
 ): string | undefined {
-	const result = spawnSync(command, args, {
+	const result = spawnProcessSync(command, args, {
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
-		shell: shouldUseWindowsShell(command),
 	});
 	if (result.status === 0) return result.stdout.trim() || undefined;
 	if (options.requireSuccess) {
@@ -169,7 +162,7 @@ function readCommandOutput(
 	return undefined;
 }
 
-function getGlobalPackageRoots(method: InstallMethod, packageName: string, npmCommand?: string[]): string[] {
+function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmCommand?: string[]): string[] {
 	switch (method) {
 		case "npm": {
 			const configured = !!npmCommand?.length;
@@ -187,7 +180,7 @@ function getGlobalPackageRoots(method: InstallMethod, packageName: string, npmCo
 			const root = readCommandOutput(command, [...npmArgs, "root", "-g"], {
 				requireSuccess: configured,
 			});
-			const inferred = configured ? undefined : getInferredNpmInstall(packageName);
+			const inferred = configured ? undefined : getInferredNpmInstall();
 			return [root, inferred?.root].filter((x): x is string => !!x);
 		}
 		case "pnpm": {
@@ -212,21 +205,46 @@ function getGlobalPackageRoots(method: InstallMethod, packageName: string, npmCo
 	}
 }
 
-function normalizeExistingPathForComparison(path: string): string | undefined {
+function normalizeExistingPathForComparison(path: string, resolveSymlinks: boolean): string | undefined {
 	const resolvedPath = resolve(path);
 	if (!existsSync(resolvedPath)) {
 		return undefined;
 	}
-	let normalizedPath: string;
-	try {
-		normalizedPath = realpathSync(resolvedPath);
-	} catch {
-		return undefined;
+	let normalizedPath = resolvedPath;
+	if (resolveSymlinks) {
+		try {
+			normalizedPath = realpathSync(resolvedPath);
+		} catch {
+			return undefined;
+		}
 	}
 	if (process.platform === "win32") {
 		normalizedPath = normalizedPath.toLowerCase();
 	}
 	return normalizedPath;
+}
+
+function getPathComparisonCandidates(path: string): string[] {
+	return Array.from(
+		new Set(
+			[normalizeExistingPathForComparison(path, false), normalizeExistingPathForComparison(path, true)].filter(
+				(candidate): candidate is string => !!candidate,
+			),
+		),
+	);
+}
+
+function getEntrypointPackageDir(): string | undefined {
+	const entrypoint = process.argv[1];
+	if (!entrypoint) return undefined;
+	let dir = dirname(entrypoint);
+	while (dir !== dirname(dir)) {
+		if (existsSync(join(dir, "package.json"))) {
+			return dir;
+		}
+		dir = dirname(dir);
+	}
+	return undefined;
 }
 
 function isSelfUpdatePathWritable(): boolean {
@@ -241,17 +259,14 @@ function isSelfUpdatePathWritable(): boolean {
 }
 
 function isManagedByGlobalPackageManager(method: InstallMethod, packageName: string, npmCommand?: string[]): boolean {
-	const packageDir = normalizeExistingPathForComparison(getPackageDir());
-	return (
-		!!packageDir &&
-		getGlobalPackageRoots(method, packageName, npmCommand).some((root) => {
-			const normalizedRoot = normalizeExistingPathForComparison(root);
-			return (
-				!!normalizedRoot &&
-				packageDir.startsWith(normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`)
-			);
-		})
-	);
+	const packageDirs = [getPackageDir(), getEntrypointPackageDir()].filter((dir): dir is string => !!dir);
+	const packageDirCandidates = packageDirs.flatMap((dir) => getPathComparisonCandidates(dir));
+	return getGlobalPackageRoots(method, packageName, npmCommand).some((root) => {
+		return getPathComparisonCandidates(root).some((normalizedRoot) => {
+			const rootPrefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+			return packageDirCandidates.some((packageDir) => packageDir.startsWith(rootPrefix));
+		});
+	});
 }
 
 export function getSelfUpdateCommand(
