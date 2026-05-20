@@ -7,6 +7,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -47,7 +48,7 @@ import {
 	TUI,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { spawn, spawnSync } from "child_process";
+import { execFile, spawn, spawnSync } from "child_process";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -60,6 +61,8 @@ import {
 } from "../../config.js";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.js";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.js";
+import { createStdioExecutionContext } from "../../core/backends/stdio.js";
+import type { ExecutionContext } from "../../core/execution-context.js";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -136,6 +139,8 @@ import {
 	type ThemeColor,
 	theme,
 } from "./theme/theme.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -2501,6 +2506,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/bridge" || text.startsWith("/bridge ")) {
+				this.editor.setText("");
+				await this.handleBridgeCommand(text);
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -2678,6 +2688,11 @@ export class InteractiveMode {
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+
+			case "tool_context_changed":
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -5210,6 +5225,66 @@ export class InteractiveMode {
 	 */
 	private getEditorKeyDisplay(action: Keybinding): string {
 		return keyDisplayText(action);
+	}
+
+	private async handleBridgeCommand(text: string): Promise<void> {
+		const argument = text.slice("/bridge".length).trim();
+		if (!argument || argument === "status") {
+			const context = this.session.getExecutionContext();
+			if (context) {
+				this.showStatus(`Tool context: ${context.label ?? context.id} at ${context.cwd}`);
+			} else {
+				this.showStatus(`Tool context: local at ${this.session.sessionManager.getCwd()}`);
+			}
+			return;
+		}
+
+		if (this.session.isStreaming || this.session.isCompacting || this.session.isBashRunning) {
+			this.showWarning("Wait for the current operation to finish before switching tool context.");
+			return;
+		}
+
+		if (argument === "off" || argument === "local") {
+			this.session.setExecutionContext(undefined);
+			this.showStatus("Tool context: local");
+			return;
+		}
+
+		try {
+			const context = await this.createBridgeExecutionContext(argument);
+			this.session.setExecutionContext(context);
+			this.showStatus(`Tool context: ${context.label ?? context.id} at ${context.cwd}`);
+		} catch (error) {
+			this.showError(`Bridge failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async createBridgeExecutionContext(target: string): Promise<ExecutionContext> {
+		const cwd = this.session.sessionManager.getCwd();
+		const expandedTarget = target.startsWith("~/")
+			? path.join(os.homedir(), target.slice(2))
+			: target === "~"
+				? os.homedir()
+				: target;
+		const candidatePath = path.isAbsolute(expandedTarget) ? expandedTarget : path.resolve(cwd, expandedTarget);
+		if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).isDirectory()) {
+			return createStdioExecutionContext(candidatePath, {
+				command: "pi-bridge",
+				args: ["--stdio"],
+				cwd: candidatePath,
+			});
+		}
+
+		const { stdout } = await execFileAsync("project", ["path", target], { cwd });
+		const projectCwd = stdout.trim();
+		if (!projectCwd) {
+			throw new Error(`project path ${target} returned no path`);
+		}
+		return createStdioExecutionContext(projectCwd, {
+			command: "project",
+			args: ["run", target, "--", "pi-bridge", "--stdio"],
+			cwd,
+		});
 	}
 
 	private handleHotkeysCommand(): void {

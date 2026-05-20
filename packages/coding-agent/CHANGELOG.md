@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added `/bridge` to switch built-in tool execution to a `pi-bridge --stdio` target during an interactive session.
+
 ## [0.75.3] - 2026-05-18
 
 ### Fixed

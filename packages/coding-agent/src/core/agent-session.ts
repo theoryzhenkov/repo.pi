@@ -129,6 +129,10 @@ export type AgentSessionEvent =
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "session_info_changed"; name: string | undefined }
+	| {
+			type: "tool_context_changed";
+			context: { id: string; kind: string; label: string | undefined; cwd: string } | undefined;
+	  }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
 			type: "compaction_end";
@@ -831,6 +835,36 @@ export class AgentSession {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	getExecutionContext(): ExecutionContext | undefined {
+		return this._executionContext;
+	}
+
+	/**
+	 * Switch the backend used by built-in tools and direct bash execution.
+	 * Changes take effect on the next tool call without changing the session cwd.
+	 */
+	setExecutionContext(executionContext: ExecutionContext | undefined): void {
+		const previousContext = this._executionContext;
+		const activeToolNames = this.getActiveToolNames();
+		this._executionContext = executionContext;
+		this._baseToolDefinitions = this._createBaseToolDefinitions();
+		this._refreshToolRegistry({ activeToolNames });
+		if (previousContext !== executionContext) {
+			void previousContext?.backend.dispose?.();
+		}
+		this._emit({
+			type: "tool_context_changed",
+			context: executionContext
+				? {
+						id: executionContext.id,
+						kind: executionContext.backend.kind,
+						label: executionContext.label,
+						cwd: executionContext.cwd,
+					}
+				: undefined,
+		});
 	}
 
 	/**
@@ -2354,11 +2388,7 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
-	private _buildRuntime(options: {
-		activeToolNames?: string[];
-		flagValues?: Map<string, boolean | string>;
-		includeAllExtensionTools?: boolean;
-	}): void {
+	private _createBaseToolDefinitions(): Map<string, ToolDefinition> {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
@@ -2378,9 +2408,15 @@ export class AgentSession {
 					bash: { ...backendToolOptions?.bash, commandPrefix: shellCommandPrefix, shellPath },
 				});
 
-		this._baseToolDefinitions = new Map(
-			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
-		);
+		return new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]));
+	}
+
+	private _buildRuntime(options: {
+		activeToolNames?: string[];
+		flagValues?: Map<string, boolean | string>;
+		includeAllExtensionTools?: boolean;
+	}): void {
+		this._baseToolDefinitions = this._createBaseToolDefinitions();
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {

@@ -102,6 +102,15 @@ export class FooterComponent implements Component {
 			pwd = `${pwd} (${branch})`;
 		}
 
+		const executionContext = this.session.getExecutionContext();
+		if (executionContext) {
+			let toolCwd = executionContext.cwd;
+			if (home && toolCwd.startsWith(home)) {
+				toolCwd = `~${toolCwd.slice(home.length)}`;
+			}
+			pwd = `${pwd} • tools: ${sanitizeStatusText(toolCwd)}`;
+		}
+
 		// Add session name if set
 		const sessionName = this.session.sessionManager.getSessionName();
 		if (sessionName) {
