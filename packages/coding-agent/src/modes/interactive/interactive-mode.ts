@@ -5275,13 +5275,24 @@ export class InteractiveMode {
 			});
 		}
 
-		const { stdout } = await execFileAsync("project", ["path", target], { cwd });
+		const realmCommand = spawnSync("realm", ["--help"], { stdio: "ignore" }).status === 0 ? "realm" : undefined;
+		const projectCommand = realmCommand
+			? undefined
+			: spawnSync("project", ["--help"], { stdio: "ignore" }).status === 0
+				? "project"
+				: undefined;
+		const command = realmCommand ?? projectCommand;
+		if (!command) {
+			throw new Error("Neither realm nor project command is available in PATH");
+		}
+
+		const { stdout } = await execFileAsync(command, ["path", target], { cwd });
 		const projectCwd = stdout.trim();
 		if (!projectCwd) {
-			throw new Error(`project path ${target} returned no path`);
+			throw new Error(`${command} path ${target} returned no path`);
 		}
 		return createStdioExecutionContext(projectCwd, {
-			command: "project",
+			command,
 			args: ["run", target, "--", "pi-bridge", "--stdio"],
 			cwd,
 		});
