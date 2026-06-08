@@ -1,4 +1,4 @@
-import type { BashOperations, ToolsOptions } from "./tools/index.js";
+import type { BashOperations, ToolsOptions } from "./tools/index.ts";
 
 export interface ToolBackendCapabilities {
 	bash?: boolean;

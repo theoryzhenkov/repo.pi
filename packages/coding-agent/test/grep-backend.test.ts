@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createGrepToolDefinition, type GrepOperations } from "../src/core/tools/grep.js";
-import { ensureTool } from "../src/utils/tools-manager.js";
+import { createGrepToolDefinition, type GrepOperations } from "../src/core/tools/grep.ts";
+import { ensureTool } from "../src/utils/tools-manager.ts";
 
-vi.mock("../src/utils/tools-manager.js", () => ({
+vi.mock("../src/utils/tools-manager.ts", () => ({
 	ensureTool: vi.fn(async () => {
 		throw new Error("ensureTool should not run for delegated grep");
 	}),

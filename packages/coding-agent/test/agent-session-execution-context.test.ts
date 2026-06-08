@@ -3,12 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../src/core/execution-context.js";
-import { DefaultResourceLoader } from "../src/core/resource-loader.js";
-import { createAgentSession } from "../src/core/sdk.js";
-import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
-import type { BashOperations, ToolsOptions } from "../src/core/tools/index.js";
+import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../src/core/execution-context.ts";
+import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import { createAgentSession } from "../src/core/sdk.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import type { BashOperations, ToolsOptions } from "../src/core/tools/index.ts";
 
 class CapturingBackend implements ToolBackend {
 	readonly id = "capture";

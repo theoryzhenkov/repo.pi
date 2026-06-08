@@ -1,6 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../execution-context.js";
+import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../execution-context.ts";
 import type {
 	BashOperations,
 	FindOperations,
@@ -9,8 +9,8 @@ import type {
 	LsOperations,
 	ReadOperations,
 	ToolsOptions,
-} from "../tools/index.js";
-import type { WriteOperations } from "../tools/write.js";
+} from "../tools/index.ts";
+import type { WriteOperations } from "../tools/write.ts";
 
 export interface StdioBridgeBackendOptions {
 	command: string;
@@ -71,8 +71,11 @@ export class StdioBridgeBackend implements ToolBackend {
 	private initialized: Promise<void> | undefined;
 	private capabilities: ToolBackendCapabilities = {};
 	private bridgeCwd: string | undefined;
+	private readonly options: StdioBridgeBackendOptions;
 
-	constructor(private readonly options: StdioBridgeBackendOptions) {}
+	constructor(options: StdioBridgeBackendOptions) {
+		this.options = options;
+	}
 
 	createToolOptions(_ctx: ExecutionContext): ToolsOptions {
 		const readOps = this.createReadOperations();

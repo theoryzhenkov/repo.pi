@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveBridgeCwd } from "../src/bridge/stdio-server.js";
+import { resolveBridgeCwd } from "../src/bridge/stdio-server.ts";
 
 describe("stdio bridge cwd resolution", () => {
 	let baseDir: string;

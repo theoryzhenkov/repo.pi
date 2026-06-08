@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { runStdioBridge } from "./stdio-server.js";
+import { runStdioBridge } from "./stdio-server.ts";
 
 if (process.argv.includes("--stdio")) {
 	runStdioBridge();

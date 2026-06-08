@@ -5,48 +5,51 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.js";
-import { processFileArguments } from "./cli/file-processor.js";
-import { buildInitialMessage } from "./cli/initial-message.js";
-import { listModels } from "./cli/list-models.js";
-import { selectSession } from "./cli/session-picker.js";
-import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.js";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.js";
+import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { processFileArguments } from "./cli/file-processor.ts";
+import { buildInitialMessage } from "./cli/initial-message.ts";
+import { listModels } from "./cli/list-models.ts";
+import { selectSession } from "./cli/session-picker.ts";
+import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
-} from "./core/agent-session-services.js";
-import { formatNoModelsAvailableMessage } from "./core/auth-guidance.js";
-import { AuthStorage } from "./core/auth-storage.js";
-import { exportFromFile } from "./core/export-html/index.js";
-import type { ExtensionFactory } from "./core/extensions/types.js";
-import { KeybindingsManager } from "./core/keybindings.js";
-import type { ModelRegistry } from "./core/model-registry.js";
-import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
-import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
-import type { CreateAgentSessionOptions } from "./core/sdk.js";
+} from "./core/agent-session-services.ts";
+import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
+import { AuthStorage } from "./core/auth-storage.ts";
+import { exportFromFile } from "./core/export-html/index.ts";
+import { emitProjectTrustEvent } from "./core/extensions/runner.ts";
+import type { ExtensionFactory, LoadExtensionsResult, ProjectTrustContext } from "./core/extensions/types.ts";
+import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
+import { KeybindingsManager } from "./core/keybindings.ts";
+import type { ModelRegistry } from "./core/model-registry.ts";
+import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
+import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
 	MissingSessionCwdError,
 	type SessionCwdIssue,
-} from "./core/session-cwd.js";
-import { SessionManager } from "./core/session-manager.js";
-import { SettingsManager } from "./core/settings-manager.js";
-import { printTimings, resetTimings, time } from "./core/timings.js";
-import { runMigrations, showDeprecationWarnings } from "./migrations.js";
-import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.js";
-import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.js";
-import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
-import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.js";
-import { isLocalPath } from "./utils/paths.js";
-import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.js";
+} from "./core/session-cwd.ts";
+import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
+import { SettingsManager } from "./core/settings-manager.ts";
+import { printTimings, resetTimings, time } from "./core/timings.ts";
+import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
+import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
+import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
+import { ExtensionInputComponent } from "./modes/interactive/components/extension-input.ts";
+import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
+import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
+import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 /**
  * Read all content from piped stdin.
@@ -145,27 +148,38 @@ type ResolvedSession =
  * Resolve a session argument to a file path.
  * If it looks like a path, use as-is. Otherwise try to match as session ID prefix.
  */
+async function findLocalSessionByExactId(
+	sessionId: string,
+	cwd: string,
+	sessionDir?: string,
+): Promise<{ type: "local"; path: string } | undefined> {
+	const localSessions = await SessionManager.list(cwd, sessionDir);
+	const localMatch = localSessions.find((s) => s.id === sessionId);
+	return localMatch ? { type: "local", path: localMatch.path } : undefined;
+}
+
 async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: string): Promise<ResolvedSession> {
-	// If it looks like a file path, use as-is
+	// If it looks like a file path, resolve it before handing it to the session manager.
 	if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
-		return { type: "path", path: sessionArg };
+		return { type: "path", path: resolvePath(sessionArg, cwd) };
 	}
 
 	// Try to match as session ID in current project first
 	const localSessions = await SessionManager.list(cwd, sessionDir);
-	const localMatches = localSessions.filter((s) => s.id.startsWith(sessionArg));
+	const localMatch =
+		localSessions.find((s) => s.id === sessionArg) ?? localSessions.find((s) => s.id.startsWith(sessionArg));
 
-	if (localMatches.length >= 1) {
-		return { type: "local", path: localMatches[0].path };
+	if (localMatch) {
+		return { type: "local", path: localMatch.path };
 	}
 
 	// Try global search across all projects
-	const allSessions = await SessionManager.listAll();
-	const globalMatches = allSessions.filter((s) => s.id.startsWith(sessionArg));
+	const allSessions = await SessionManager.listAll(sessionDir);
+	const globalMatch =
+		allSessions.find((s) => s.id === sessionArg) ?? allSessions.find((s) => s.id.startsWith(sessionArg));
 
-	if (globalMatches.length >= 1) {
-		const match = globalMatches[0];
-		return { type: "global", path: match.path, cwd: match.cwd };
+	if (globalMatch) {
+		return { type: "global", path: globalMatch.path, cwd: globalMatch.cwd };
 	}
 
 	// Not found anywhere
@@ -202,9 +216,33 @@ function validateForkFlags(parsed: Args): void {
 	}
 }
 
-function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): SessionManager {
+function validateSessionIdFlags(parsed: Args): void {
+	if (parsed.sessionId === undefined) return;
+
+	const conflictingFlags = [
+		parsed.session ? "--session" : undefined,
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume ? "--resume" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+	].filter((flag): flag is string => flag !== undefined);
+
+	if (conflictingFlags.length > 0) {
+		console.error(chalk.red(`Error: --session-id cannot be combined with ${conflictingFlags.join(", ")}`));
+		process.exit(1);
+	}
+
 	try {
-		return SessionManager.forkFrom(sourcePath, cwd, sessionDir);
+		assertValidSessionId(parsed.sessionId);
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(chalk.red(`Error: ${message}`));
+		process.exit(1);
+	}
+}
+
+function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string, sessionId?: string): SessionManager {
+	try {
+		return SessionManager.forkFrom(sourcePath, cwd, sessionDir, { id: sessionId });
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -218,18 +256,26 @@ async function createSessionManager(
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
 ): Promise<SessionManager> {
-	if (parsed.noSession) {
-		return SessionManager.inMemory();
+	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
+		return SessionManager.inMemory(cwd);
 	}
 
 	if (parsed.fork) {
+		if (parsed.sessionId) {
+			const existingTarget = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
+			if (existingTarget) {
+				console.error(chalk.red(`Session already exists with id '${parsed.sessionId}'`));
+				process.exit(1);
+			}
+		}
+
 		const resolved = await resolveSessionPath(parsed.fork, cwd, sessionDir);
 
 		switch (resolved.type) {
 			case "path":
 			case "local":
 			case "global":
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
+				return forkSessionOrExit(resolved.path, cwd, sessionDir, parsed.sessionId);
 
 			case "not_found":
 				console.error(chalk.red(`No session found matching '${resolved.arg}'`));
@@ -266,7 +312,7 @@ async function createSessionManager(
 		try {
 			const selectedPath = await selectSession(
 				(onProgress) => SessionManager.list(cwd, sessionDir, onProgress),
-				SessionManager.listAll,
+				(onProgress) => SessionManager.listAll(sessionDir, onProgress),
 			);
 			if (!selectedPath) {
 				console.log(chalk.dim("No session selected"));
@@ -282,7 +328,14 @@ async function createSessionManager(
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
 
-	return SessionManager.create(cwd, sessionDir);
+	if (parsed.sessionId) {
+		const existingSession = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
+		if (existingSession) {
+			return SessionManager.open(existingSession.path, sessionDir);
+		}
+	}
+
+	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
 }
 
 function buildSessionOptions(
@@ -375,46 +428,259 @@ function buildSessionOptions(
 	if (parsed.tools) {
 		options.tools = [...parsed.tools];
 	}
+	if (parsed.excludeTools) {
+		options.excludeTools = [...parsed.excludeTools];
+	}
 
 	return { options, cliThinkingFromModel, diagnostics };
 }
 
 function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
-	return paths?.map((value) => (isLocalPath(value) ? resolve(cwd, value) : value));
+	return paths?.map((value) => (isLocalPath(value) ? resolvePath(value, cwd) : value));
 }
 
-async function promptForMissingSessionCwd(
-	issue: SessionCwdIssue,
-	settingsManager: SettingsManager,
-): Promise<string | undefined> {
+function createStartupTui(settingsManager: SettingsManager): TUI {
 	initTheme(settingsManager.getTheme());
 	setKeybindings(KeybindingsManager.create());
+	const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+	ui.setClearOnShrink(settingsManager.getClearOnShrink());
+	return ui;
+}
 
+async function clearStartupTui(ui: TUI): Promise<void> {
+	ui.clear();
+	ui.requestRender();
+	await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+async function showStartupSelector<T>(
+	settingsManager: SettingsManager,
+	title: string,
+	options: Array<{ label: string; value: T }>,
+): Promise<T | undefined> {
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
-		ui.setClearOnShrink(settingsManager.getClearOnShrink());
+		const ui = createStartupTui(settingsManager);
 
 		let settled = false;
-		const finish = (result: string | undefined) => {
+		const finish = async (result: T | undefined) => {
 			if (settled) {
 				return;
 			}
 			settled = true;
+			await clearStartupTui(ui);
 			ui.stop();
 			resolve(result);
 		};
 
 		const selector = new ExtensionSelectorComponent(
-			formatMissingSessionCwdPrompt(issue),
-			["Continue", "Cancel"],
-			(option) => finish(option === "Continue" ? issue.fallbackCwd : undefined),
-			() => finish(undefined),
+			title,
+			options.map((option) => option.label),
+			(option) => void finish(options.find((entry) => entry.label === option)?.value),
+			() => void finish(undefined),
 			{ tui: ui },
 		);
 		ui.addChild(selector);
 		ui.setFocus(selector);
 		ui.start();
 	});
+}
+
+async function showStartupInput(
+	settingsManager: SettingsManager,
+	title: string,
+	placeholder?: string,
+): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		const ui = createStartupTui(settingsManager);
+
+		let settled = false;
+		const finish = async (result: string | undefined) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			input.dispose();
+			await clearStartupTui(ui);
+			ui.stop();
+			resolve(result);
+		};
+
+		const input = new ExtensionInputComponent(
+			title,
+			placeholder,
+			(value) => void finish(value),
+			() => void finish(undefined),
+			{
+				tui: ui,
+			},
+		);
+		ui.addChild(input);
+		ui.setFocus(input);
+		ui.start();
+	});
+}
+
+async function promptForMissingSessionCwd(
+	issue: SessionCwdIssue,
+	settingsManager: SettingsManager,
+): Promise<string | undefined> {
+	return showStartupSelector(settingsManager, formatMissingSessionCwdPrompt(issue), [
+		{ label: "Continue", value: issue.fallbackCwd },
+		{ label: "Cancel", value: undefined },
+	]);
+}
+
+interface ProjectTrustPromptResult {
+	trusted: boolean;
+	remember: boolean;
+}
+
+const PROJECT_TRUST_PROMPT_OPTIONS: Array<{ label: string; value: ProjectTrustPromptResult }> = [
+	{ label: "Trust", value: { trusted: true, remember: true } },
+	{ label: "Trust (this session only)", value: { trusted: true, remember: false } },
+	{ label: "Do not trust", value: { trusted: false, remember: true } },
+	{ label: "Do not trust (this session only)", value: { trusted: false, remember: false } },
+];
+
+function formatProjectTrustPrompt(cwd: string): string {
+	return `Trust project folder?\n${cwd}\n\nThis allows pi to read project instructions (AGENTS.md/CLAUDE.md), load .pi settings and resources, install missing project packages, and execute project extensions.`;
+}
+
+async function promptForProjectTrust(
+	cwd: string,
+	settingsManager: SettingsManager,
+): Promise<ProjectTrustPromptResult | undefined> {
+	return showStartupSelector(settingsManager, formatProjectTrustPrompt(cwd), PROJECT_TRUST_PROMPT_OPTIONS);
+}
+
+async function promptForProjectTrustWithContext(
+	cwd: string,
+	ctx: ProjectTrustContext,
+): Promise<ProjectTrustPromptResult | undefined> {
+	const selected = await ctx.ui.select(
+		formatProjectTrustPrompt(cwd),
+		PROJECT_TRUST_PROMPT_OPTIONS.map((option) => option.label),
+	);
+	return PROJECT_TRUST_PROMPT_OPTIONS.find((option) => option.label === selected)?.value;
+}
+
+function createProjectTrustContext(options: {
+	cwd: string;
+	mode: AppMode;
+	settingsManager: SettingsManager;
+	hasUI: boolean;
+}): ProjectTrustContext {
+	return {
+		cwd: options.cwd,
+		mode: options.mode === "interactive" ? "tui" : options.mode,
+		hasUI: options.hasUI,
+		ui: {
+			select: async (title, selectOptions) => {
+				if (!options.hasUI) {
+					return undefined;
+				}
+				if (options.mode !== "interactive") {
+					return undefined;
+				}
+				return showStartupSelector(
+					options.settingsManager,
+					title,
+					selectOptions.map((option) => ({ label: option, value: option })),
+				);
+			},
+			confirm: async (title, message) => {
+				if (!options.hasUI) {
+					return false;
+				}
+				if (options.mode !== "interactive") {
+					return false;
+				}
+				return (
+					(await showStartupSelector(options.settingsManager, `${title}\n${message}`, [
+						{ label: "Yes", value: true },
+						{ label: "No", value: false },
+					])) ?? false
+				);
+			},
+			input: async (title, placeholder) => {
+				if (!options.hasUI) {
+					return undefined;
+				}
+				if (options.mode !== "interactive") {
+					return undefined;
+				}
+				return showStartupInput(options.settingsManager, title, placeholder);
+			},
+			notify: (message, type = "info") => {
+				if (options.mode !== "interactive") {
+					const color = type === "error" ? chalk.red : type === "warning" ? chalk.yellow : chalk.cyan;
+					console.error(color(message));
+				}
+			},
+		},
+	};
+}
+
+async function resolveProjectTrusted(options: {
+	cwd: string;
+	trustStore: ProjectTrustStore;
+	trustOverride?: boolean;
+	appMode: AppMode;
+	settingsManagerForPrompt: SettingsManager;
+	extensionsResult?: LoadExtensionsResult;
+	projectTrustContext?: ProjectTrustContext;
+	onExtensionError?: (message: string) => void;
+}): Promise<boolean> {
+	if (options.trustOverride !== undefined) {
+		return options.trustOverride;
+	}
+	if (!hasProjectTrustInputs(options.cwd)) {
+		return true;
+	}
+
+	if (options.extensionsResult && options.projectTrustContext) {
+		const { result, errors } = await emitProjectTrustEvent(
+			options.extensionsResult,
+			{ type: "project_trust", cwd: options.cwd },
+			options.projectTrustContext,
+		);
+		for (const error of errors) {
+			options.onExtensionError?.(`Extension "${error.extensionPath}" project_trust error: ${error.error}`);
+		}
+		if (result) {
+			if (result.remember === true) {
+				options.trustStore.set(options.cwd, result.trusted);
+			}
+			return result.trusted;
+		}
+	}
+
+	const decision = options.trustStore.get(options.cwd);
+	if (decision !== null) {
+		return decision;
+	}
+	if (options.projectTrustContext?.hasUI) {
+		const selected = await promptForProjectTrustWithContext(options.cwd, options.projectTrustContext);
+		if (selected !== undefined) {
+			if (selected.remember) {
+				options.trustStore.set(options.cwd, selected.trusted);
+			}
+			return selected.trusted;
+		}
+		return false;
+	}
+	if (options.appMode !== "interactive") {
+		return false;
+	}
+
+	const selected = await promptForProjectTrust(options.cwd, options.settingsManagerForPrompt);
+	if (selected !== undefined) {
+		if (selected.remember) {
+			options.trustStore.set(options.cwd, selected.trusted);
+		}
+		return selected.trusted;
+	}
+	return false;
 }
 
 export interface MainOptions {
@@ -483,6 +749,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	validateForkFlags(parsed);
+	validateSessionIdFlags(parsed);
 
 	// Run migrations (pass cwd for project-local migrations)
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
@@ -500,7 +767,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// sessionDir lookup during session selection.
 	const envSessionDir = process.env[ENV_SESSION_DIR];
 	const sessionDir =
-		parsed.sessionDir ??
+		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
@@ -517,7 +784,22 @@ export async function main(args: string[], options?: MainOptions) {
 			process.exit(1);
 		}
 	}
+	if (parsed.name !== undefined) {
+		const name = parsed.name.trim();
+		if (!name) {
+			console.error(chalk.red("Error: --name requires a non-empty value"));
+			process.exit(1);
+		}
+		sessionManager.appendSessionInfo(name);
+	}
 	time("createSessionManager");
+
+	const trustStore = new ProjectTrustStore(agentDir);
+	const sessionCwd = sessionManager.getCwd();
+	const autoTrustOnReloadCwd =
+		parsed.projectTrustOverride === undefined && !hasProjectTrustInputs(sessionCwd) ? sessionCwd : undefined;
+	const trustPromptMode: AppMode = parsed.help || parsed.listModels !== undefined ? "print" : appMode;
+	const projectTrustByCwd = new Map<string, boolean>();
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
@@ -529,12 +811,49 @@ export async function main(args: string[], options?: MainOptions) {
 		agentDir,
 		sessionManager,
 		sessionStartEvent,
+		projectTrustContext,
 	}) => {
+		const isInitialRuntime = sessionStartEvent === undefined;
+		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
+		const cachedProjectTrust = projectTrustByCwd.get(cwd);
+		const hasTrustInputs = hasProjectTrustInputs(cwd);
+		const shouldResolveProjectTrust =
+			parsed.projectTrustOverride === undefined && cachedProjectTrust === undefined && hasTrustInputs;
+		const projectTrusted = shouldResolveProjectTrust
+			? false
+			: (cachedProjectTrust ?? parsed.projectTrustOverride ?? (!hasTrustInputs || trustStore.get(cwd) === true));
+		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
 			authStorage,
+			settingsManager: runtimeSettingsManager,
 			extensionFlagValues: parsed.unknownFlags,
+			resourceLoaderReloadOptions: shouldResolveProjectTrust
+				? {
+						resolveProjectTrust: async ({ extensionsResult }) => {
+							const trusted = await resolveProjectTrusted({
+								cwd,
+								trustStore,
+								trustOverride: parsed.projectTrustOverride,
+								appMode: isInitialRuntime ? trustPromptMode : "print",
+								settingsManagerForPrompt: startupSettingsManager,
+								extensionsResult,
+								projectTrustContext:
+									projectTrustContext ??
+									createProjectTrustContext({
+										cwd,
+										mode: isInitialRuntime ? trustPromptMode : appMode,
+										settingsManager: startupSettingsManager,
+										hasUI: isInitialRuntime && trustPromptMode === "interactive",
+									}),
+								onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+							});
+							projectTrustByCwd.set(cwd, trusted);
+							return trusted;
+						},
+					}
+				: undefined,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,
@@ -552,6 +871,7 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
+			...projectTrustDiagnostics,
 			...services.diagnostics,
 			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
 			...resourceLoader.getExtensions().errors.map(({ path, error }) => ({
@@ -595,6 +915,7 @@ export async function main(args: string[], options?: MainOptions) {
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,
+			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
@@ -615,8 +936,10 @@ export async function main(args: string[], options?: MainOptions) {
 		agentDir,
 		sessionManager,
 	});
+	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
+	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
 	if (parsed.help) {
 		const extensionFlags = resourceLoader
@@ -681,6 +1004,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			modelFallbackMessage,
+			autoTrustOnReloadCwd,
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,

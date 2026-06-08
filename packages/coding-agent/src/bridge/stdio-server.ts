@@ -3,9 +3,9 @@ import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promi
 import { isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { glob } from "glob";
-import { createLocalBashOperations } from "../core/tools/bash.js";
-import { createGrepToolDefinition, type GrepToolDetails } from "../core/tools/grep.js";
-import { detectSupportedImageMimeTypeFromFile } from "../utils/mime.js";
+import { createLocalBashOperations } from "../core/tools/bash.ts";
+import { createGrepToolDefinition, type GrepToolDetails } from "../core/tools/grep.ts";
+import { detectSupportedImageMimeTypeFromFile } from "../utils/mime.ts";
 
 interface BridgeRequest {
 	id: string;

@@ -10,8 +10,7 @@ import type {
 	ChatCompletionSystemMessageParam,
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
-import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost, clampThinkingLevel } from "../models.js";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -29,15 +28,16 @@ import type {
 	Tool,
 	ToolCall,
 	ToolResultMessage,
-} from "../types.js";
-import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { headersToRecord } from "../utils/headers.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { buildBaseOptions } from "./simple-options.js";
-import { transformMessages } from "./transform-messages.js";
+} from "../types.ts";
+import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { headersToRecord } from "../utils/headers.ts";
+import { parseStreamingJson } from "../utils/json-parse.ts";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
+import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import { buildBaseOptions } from "./simple-options.ts";
+import { transformMessages } from "./transform-messages.ts";
 
 /**
  * Check if conversation messages contain tool calls or tool results.
@@ -135,7 +135,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 		};
 
 		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			const apiKey = options?.apiKey;
+			if (!apiKey) {
+				throw new Error(`No API key for provider: ${model.provider}`);
+			}
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
@@ -148,7 +151,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
+				maxRetries: options?.maxRetries ?? 0,
 			};
 			const { data: openaiStream, response } = await client.chat.completions
 				.create(params, requestOptions)
@@ -427,7 +430,7 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = options?.apiKey;
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
@@ -447,20 +450,11 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 function createClient(
 	model: Model<"openai-completions">,
 	context: Context,
-	apiKey?: string,
+	apiKey: string,
 	optionsHeaders?: Record<string, string>,
 	sessionId?: string,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 ) {
-	if (!apiKey) {
-		if (!process.env.OPENAI_API_KEY) {
-			throw new Error(
-				"OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.",
-			);
-		}
-		apiKey = process.env.OPENAI_API_KEY;
-	}
-
 	const headers = { ...model.headers };
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
@@ -516,7 +510,7 @@ function buildParams(
 		prompt_cache_key:
 			(model.baseUrl.includes("api.openai.com") && cacheRetention !== "none") ||
 			(cacheRetention === "long" && compat.supportsLongCacheRetention)
-				? options?.sessionId
+				? clampOpenAIPromptCacheKey(options?.sessionId)
 				: undefined,
 		prompt_cache_retention: cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined,
 	};
@@ -570,7 +564,7 @@ function buildParams(
 		};
 	} else if (compat.thinkingFormat === "deepseek" && model.reasoning) {
 		(params as any).thinking = { type: options?.reasoningEffort ? "enabled" : "disabled" };
-		if (options?.reasoningEffort) {
+		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
 			(params as any).reasoning_effort =
 				model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
 		}
@@ -584,6 +578,11 @@ function buildParams(
 		} else if (model.thinkingLevelMap?.off !== null) {
 			openRouterParams.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
 		}
+	} else if (compat.thinkingFormat === "ant-ling" && model.reasoning && options?.reasoningEffort) {
+		const effort = model.thinkingLevelMap?.[options.reasoningEffort];
+		if (typeof effort === "string") {
+			(params as typeof params & { reasoning?: { effort: string } }).reasoning = { effort };
+		}
 	} else if (compat.thinkingFormat === "together" && model.reasoning) {
 		const togetherParams = params as Omit<typeof params, "reasoning_effort"> & {
 			reasoning?: { enabled: boolean };
@@ -592,6 +591,13 @@ function buildParams(
 		togetherParams.reasoning = { enabled: !!options?.reasoningEffort };
 		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
 			togetherParams.reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+		}
+	} else if (compat.thinkingFormat === "string-thinking" && model.reasoning) {
+		const stringThinkingParams = params as typeof params & { thinking?: string };
+		if (options?.reasoningEffort) {
+			stringThinkingParams.thinking = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+		} else if (model.thinkingLevelMap?.off !== null) {
+			stringThinkingParams.thinking = model.thinkingLevelMap?.off ?? "none";
 		}
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
@@ -604,7 +610,7 @@ function buildParams(
 	}
 
 	// OpenRouter provider routing preferences
-	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
+	if (model.compat?.openRouterRouting) {
 		(params as any).provider = model.compat.openRouterRouting;
 	}
 
@@ -1070,14 +1076,22 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const provider = model.provider;
 	const baseUrl = model.baseUrl;
 
-	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
+	const isZai =
+		provider === "zai" ||
+		provider === "zai-coding-cn" ||
+		baseUrl.includes("api.z.ai") ||
+		baseUrl.includes("open.bigmodel.cn");
 	const isTogether =
 		provider === "together" || baseUrl.includes("api.together.ai") || baseUrl.includes("api.together.xyz");
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
+	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
+	const isNvidia = provider === "nvidia" || baseUrl.includes("integrate.api.nvidia.com");
+	const isAntLing = provider === "ant-ling" || baseUrl.includes("api.ant-ling.com");
 
 	const isNonStandard =
+		isNvidia ||
 		provider === "cerebras" ||
 		baseUrl.includes("cerebras.ai") ||
 		provider === "xai" ||
@@ -1090,18 +1104,23 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		provider === "opencode" ||
 		baseUrl.includes("opencode.ai") ||
 		isCloudflareWorkersAI ||
-		isCloudflareAiGateway;
+		isCloudflareAiGateway ||
+		isAntLing;
 
-	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether;
+	const useMaxTokens =
+		baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether || isNvidia || isAntLing;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+	const isOpenRouterDeveloperRoleModel =
+		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
 
 	return {
 		supportsStore: !isNonStandard,
-		supportsDeveloperRole: !isNonStandard,
-		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway,
+		supportsDeveloperRole: isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter),
+		supportsReasoningEffort:
+			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
 		supportsUsageInStreaming: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
@@ -1114,16 +1133,24 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 				? "zai"
 				: isTogether
 					? "together"
-					: provider === "openrouter" || baseUrl.includes("openrouter.ai")
-						? "openrouter"
-						: "openai",
+					: isAntLing
+						? "ant-ling"
+						: isOpenRouter
+							? "openrouter"
+							: "openai",
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
 		zaiToolStream: false,
-		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway,
+		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
-		supportsLongCacheRetention: !(isTogether || isCloudflareWorkersAI || isCloudflareAiGateway),
+		supportsLongCacheRetention: !(
+			isTogether ||
+			isCloudflareWorkersAI ||
+			isCloudflareAiGateway ||
+			isNvidia ||
+			isAntLing
+		),
 	};
 }
 

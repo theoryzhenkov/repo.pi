@@ -1,5 +1,5 @@
-import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../execution-context.js";
-import { type BashOperations, createLocalBashOperations, type ToolsOptions } from "../tools/index.js";
+import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../execution-context.ts";
+import { type BashOperations, createLocalBashOperations, type ToolsOptions } from "../tools/index.ts";
 
 export interface LocalBackendOptions {
 	autoResizeImages?: boolean;
@@ -10,8 +10,11 @@ export interface LocalBackendOptions {
 export class LocalToolBackend implements ToolBackend {
 	readonly id = "local";
 	readonly kind = "local";
+	private readonly options: LocalBackendOptions;
 
-	constructor(private readonly options: LocalBackendOptions = {}) {}
+	constructor(options: LocalBackendOptions = {}) {
+		this.options = options;
+	}
 
 	createToolOptions(_ctx: ExecutionContext): ToolsOptions {
 		return {
