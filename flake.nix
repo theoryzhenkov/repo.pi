@@ -20,7 +20,7 @@
           runtimeSrc = pkgs.runCommand "pi-coding-agent-runtime-src" { } ''
             mkdir -p $out
             install -m 0644 ${self}/nix/runtime-package-lock.json $out/package-lock.json
-            ${pkgs.nodejs_25}/bin/node -e '
+            ${pkgs.nodejs_24}/bin/node -e '
               const fs = require("fs");
               const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
               fs.writeFileSync(process.argv[2], JSON.stringify(lock.packages[""], null, 2) + "\n");
@@ -29,16 +29,16 @@
           runtimeNpmDeps = pkgs.fetchNpmDeps {
             src = runtimeSrc;
             name = "pi-coding-agent-runtime-npm-deps";
-            hash = "sha256-QgHm+quHG6M5Tphr7D10JIH3uWSKY0reWhKlnn/01Pc=";
+            hash = "sha256-ThWG6fCTNKi7gRIovF7MWuVh/t/1+HyQe07gGg0iceo=";
           };
         in
         pkgs.buildNpmPackage rec {
           pname = "pi-coding-agent";
-          version = "0.75.3-unstable-2026-05-18";
+          version = "0.78.1-unstable-2026-06-08";
 
           src = self;
-          nodejs = pkgs.nodejs_25;
-          npmDepsHash = "sha256-LsueSz4vGCICC6okFv9JKn1D0ULYkCHwuBY6H/8SMMU=";
+          nodejs = pkgs.nodejs_24;
+          npmDepsHash = "sha256-AkF+s9CjTbxWzkzfU83R+R9mTfNTbJCzJnP3XcOtKuw=";
           makeCacheWritable = true;
 
           postPatch = ''
