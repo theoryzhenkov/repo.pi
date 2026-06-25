@@ -63,6 +63,7 @@ npm:pkg
 - User installs go under `~/.pi/agent/npm/`.
 - Project installs go under `.pi/npm/`.
 - Distro or Nix-managed installs can set `PI_SYSTEM_PACKAGE_ROOT` or `systemPackageRoot` in `settings.json` to an optional read-only `node_modules` root. Global npm package resolution checks this root before the writable user global root, but installs, removes, and version-mismatch installs still write only to the user root.
+- To also manage which packages are requested (not just where they are found on disk), set the `PI_SYSTEM_SETTINGS` environment variable to a JSON settings file containing the system-managed `packages` array. System packages win by identity over user settings; see [Settings](settings.md#system-settings-layer).
 - Set `npmCommand` in `settings.json` to pin npm package lookup and install operations to a specific wrapper command such as `mise` or `asdf`.
 
 Example:

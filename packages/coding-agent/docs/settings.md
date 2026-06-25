@@ -4,6 +4,7 @@ Pi uses JSON settings files with project settings overriding global settings.
 
 | Location | Scope |
 |----------|-------|
+| `PI_SYSTEM_SETTINGS` env var | System (read-only defaults, managed by distro/Nix) |
 | `~/.pi/agent/settings.json` | Global (all projects) |
 | `.pi/settings.json` | Project (current directory) |
 
@@ -283,6 +284,39 @@ See [packages.md](packages.md) for package management details.
   "packages": ["pi-skills"]
 }
 ```
+
+## System Settings Layer
+
+Set the `PI_SYSTEM_SETTINGS` environment variable to a path containing a JSON
+settings file. This layer provides read-only defaults that the user cannot
+override for system-managed packages.
+
+```json
+// /nix/store/.../pi-system-settings.json (system, via PI_SYSTEM_SETTINGS)
+{
+  "packages": ["npm:pi-provider-umans@1.2.5", "npm:pi-claude-bridge@0.5.0"]
+}
+
+// ~/.pi/agent/settings.json (global, user-writable)
+{
+  "packages": ["npm:pi-provider-umans@1.4.0", "npm:pi-subagents"],
+  "theme": "dark"
+}
+
+// Result
+{
+  "packages": ["npm:pi-provider-umans@1.2.5", "npm:pi-claude-bridge@0.5.0", "npm:pi-subagents"],
+  "theme": "dark"
+}
+```
+
+For most fields, user (global) settings override system defaults. For
+`packages`, the system layer wins by package identity: a system-managed
+package keeps the system version, and user-only packages are preserved. This
+prevents stale pins from overriding distro-managed versions.
+
+The system layer is never written to. Pi only writes to global and project
+settings files.
 
 ## Project Overrides
 

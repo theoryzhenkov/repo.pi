@@ -413,4 +413,133 @@ describe("SettingsManager", () => {
 			expect(manager.getSessionDir()).toBe(join(homedir(), "sessions"));
 		});
 	});
+
+	describe("system settings layer", () => {
+		const systemSettingsPath = join(testDir, "system-settings.json");
+
+		it("should provide defaults from system settings when user has no value", () => {
+			writeFileSync(systemSettingsPath, JSON.stringify({ defaultProvider: "umans" }));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			expect(manager.getDefaultProvider()).toBe("umans");
+			expect(manager.getTheme()).toBe("dark");
+		});
+
+		it("should let user override system defaults for non-package fields", () => {
+			writeFileSync(systemSettingsPath, JSON.stringify({ defaultProvider: "umans", defaultModel: "umans-coder" }));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "anthropic" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			expect(manager.getDefaultProvider()).toBe("anthropic");
+			expect(manager.getDefaultModel()).toBe("umans-coder");
+		});
+
+		it("should make system-managed packages win over stale user versions", () => {
+			writeFileSync(
+				systemSettingsPath,
+				JSON.stringify({ packages: ["npm:pi-provider-umans@1.2.5", "npm:pi-claude-bridge@0.5.0"] }),
+			);
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ packages: ["npm:pi-provider-umans@1.4.0", "npm:pi-subagents"] }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			const packages = manager.getPackages();
+			expect(packages).toContain("npm:pi-provider-umans@1.2.5");
+			expect(packages).not.toContain("npm:pi-provider-umans@1.4.0");
+			expect(packages).toContain("npm:pi-claude-bridge@0.5.0");
+			expect(packages).toContain("npm:pi-subagents");
+		});
+
+		it("should preserve user-only packages not in system layer", () => {
+			writeFileSync(systemSettingsPath, JSON.stringify({ packages: ["npm:pi-provider-umans@1.2.5"] }));
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ packages: ["npm:pi-subagents", "npm:pi-intercom"] }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			const packages = manager.getPackages();
+			expect(packages).toEqual(["npm:pi-provider-umans@1.2.5", "npm:pi-subagents", "npm:pi-intercom"]);
+		});
+
+		it("should not write system packages to user settings file on save", async () => {
+			writeFileSync(systemSettingsPath, JSON.stringify({ packages: ["npm:pi-provider-umans@1.2.5"] }));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			manager.setTheme("light");
+			await manager.flush();
+
+			const saved = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(saved.theme).toBe("light");
+			expect(saved.packages).toBeUndefined();
+		});
+
+		it("should silently ignore missing system settings path", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, {
+				systemSettingsPath: join(testDir, "nonexistent.json"),
+			});
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.getPackages()).toEqual([]);
+		});
+
+		it("should silently ignore invalid system settings JSON", () => {
+			writeFileSync(systemSettingsPath, "{ not valid json");
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			expect(manager.getTheme()).toBe("dark");
+		});
+
+		it("should work with no system settings configured", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getTheme()).toBe("dark");
+		});
+
+		it("should handle package object form in identity merge", () => {
+			writeFileSync(
+				systemSettingsPath,
+				JSON.stringify({
+					packages: [{ source: "npm:my-extension", extensions: ["extensions/*.ts"] }],
+				}),
+			);
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ packages: ["npm:my-extension@0.4.0", "npm:user-only"] }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			const packages = manager.getPackages();
+			expect(packages).toHaveLength(2);
+			expect(packages[0]).toEqual({ source: "npm:my-extension", extensions: ["extensions/*.ts"] });
+			expect(packages[1]).toBe("npm:user-only");
+		});
+
+		it("should merge system packages after reload", async () => {
+			writeFileSync(systemSettingsPath, JSON.stringify({ packages: ["npm:pi-provider-umans@1.2.5"] }));
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-provider-umans@1.4.0"] }));
+
+			const manager = SettingsManager.create(projectDir, agentDir, { systemSettingsPath });
+			expect(manager.getPackages()).toContain("npm:pi-provider-umans@1.2.5");
+
+			// Simulate external edit to user settings
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ packages: ["npm:pi-provider-umans@1.5.0", "npm:new-pkg"] }),
+			);
+			await manager.reload();
+
+			const packages = manager.getPackages();
+			expect(packages).toContain("npm:pi-provider-umans@1.2.5");
+			expect(packages).not.toContain("npm:pi-provider-umans@1.5.0");
+			expect(packages).toContain("npm:new-pkg");
+		});
+	});
 });

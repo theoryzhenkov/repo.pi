@@ -154,6 +154,29 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	return result;
 }
 
+/** Extract the identity of a package source for deduplication.
+ * npm: strips version → npm:pkg
+ * git: strips ref → git:host/path
+ * local: the path itself
+ * object: the source string
+ */
+function packageIdentity(pkg: PackageSource): string {
+	const source = typeof pkg === "string" ? pkg : pkg.source;
+	if (source.startsWith("npm:") || source.startsWith("git:")) {
+		const lastAt = source.lastIndexOf("@");
+		return lastAt > 0 ? source.substring(0, lastAt) : source;
+	}
+	return source;
+}
+
+/** Merge two package arrays by identity: higher-priority packages win,
+ * lower-priority packages not already present are appended. */
+function mergePackagesByIdentity(higher: PackageSource[], lower: PackageSource[]): PackageSource[] {
+	const higherIdentities = new Set(higher.map(packageIdentity));
+	const lowerOnly = lower.filter((pkg) => !higherIdentities.has(packageIdentity(pkg)));
+	return [...higher, ...lowerOnly];
+}
+
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
 	const timeoutMs = parseHttpIdleTimeoutMs(value);
 	if (timeoutMs !== undefined) {
@@ -169,6 +192,7 @@ export type SettingsScope = "global" | "project";
 
 export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
+	systemSettingsPath?: string; // Override PI_SYSTEM_SETTINGS env var
 }
 
 export interface SettingsStorage {
@@ -268,6 +292,7 @@ export class InMemorySettingsStorage implements SettingsStorage {
 
 export class SettingsManager {
 	private storage: SettingsStorage;
+	private systemSettings: Settings;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
 	private settings: Settings;
@@ -283,6 +308,7 @@ export class SettingsManager {
 
 	private constructor(
 		storage: SettingsStorage,
+		initialSystem: Settings,
 		initialGlobal: Settings,
 		initialProject: Settings,
 		globalLoadError: Error | null = null,
@@ -291,13 +317,14 @@ export class SettingsManager {
 		projectTrusted = true,
 	) {
 		this.storage = storage;
+		this.systemSettings = initialSystem;
 		this.globalSettings = initialGlobal;
 		this.projectSettings = initialProject;
 		this.projectTrusted = projectTrusted;
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -313,6 +340,7 @@ export class SettingsManager {
 	/** Create a SettingsManager from an arbitrary storage backend */
 	static fromStorage(storage: SettingsStorage, options: SettingsManagerCreateOptions = {}): SettingsManager {
 		const projectTrusted = options.projectTrusted ?? true;
+		const systemSettings = SettingsManager.loadSystemSettings(options);
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
 		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
 		const initialErrors: SettingsError[] = [];
@@ -325,6 +353,7 @@ export class SettingsManager {
 
 		return new SettingsManager(
 			storage,
+			systemSettings,
 			globalLoad.settings,
 			projectLoad.settings,
 			globalLoad.error,
@@ -369,6 +398,25 @@ export class SettingsManager {
 			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
 		} catch (error) {
 			return { settings: {}, error: error as Error };
+		}
+	}
+
+	/** Load system settings from PI_SYSTEM_SETTINGS env var or explicit path.
+	 * The system layer is read-only and provides defaults/overrides that
+	 * the user cannot change. Returns empty settings on any error. */
+	private static loadSystemSettings(options: SettingsManagerCreateOptions = {}): Settings {
+		const systemPath = options.systemSettingsPath ?? process.env.PI_SYSTEM_SETTINGS?.trim();
+		if (!systemPath) {
+			return {};
+		}
+		try {
+			if (!existsSync(systemPath)) {
+				return {};
+			}
+			const content = readFileSync(systemPath, "utf-8");
+			return SettingsManager.migrateSettings(JSON.parse(content) as Record<string, unknown>);
+		} catch {
+			return {};
 		}
 	}
 
@@ -442,6 +490,10 @@ export class SettingsManager {
 		return structuredClone(this.projectSettings);
 	}
 
+	getSystemSettings(): Settings {
+		return structuredClone(this.systemSettings);
+	}
+
 	isProjectTrusted(): boolean {
 		return this.projectTrusted;
 	}
@@ -458,7 +510,7 @@ export class SettingsManager {
 		if (!trusted) {
 			this.projectSettings = {};
 			this.projectSettingsLoadError = null;
-			this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+			this.recomputeSettings();
 			return;
 		}
 
@@ -468,7 +520,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 	}
 
 	async reload(): Promise<void> {
@@ -496,12 +548,27 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.settings = deepMergeSettings(this.settings, overrides);
+	}
+
+	/** Recompute merged settings from system → global → project layers.
+	 * System-managed packages win by identity; user-only packages are preserved. */
+	private recomputeSettings(): void {
+		// Merge global + project (existing behavior: project overrides global, arrays replaced)
+		const userSettings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		// Layer system settings under user settings (user wins for non-array fields)
+		this.settings = deepMergeSettings(this.systemSettings, userSettings);
+		// Packages merge by identity: system wins for managed entries, user-only preserved
+		const systemPackages = this.systemSettings.packages;
+		if (systemPackages && systemPackages.length > 0) {
+			const userPackages = userSettings.packages ?? [];
+			this.settings.packages = mergePackagesByIdentity(systemPackages, userPackages);
+		}
 	}
 
 	/** Mark a global field as modified during this session */
@@ -602,7 +669,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -620,7 +687,7 @@ export class SettingsManager {
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.projectSettingsLoadError) {
 			return;
