@@ -295,7 +295,7 @@ export class SettingsManager {
 	private systemSettings: Settings;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
-	private settings: Settings;
+	private settings!: Settings;
 	private projectTrusted: boolean;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
