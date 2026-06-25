@@ -29,16 +29,16 @@
           runtimeNpmDeps = pkgs.fetchNpmDeps {
             src = runtimeSrc;
             name = "pi-coding-agent-runtime-npm-deps";
-            hash = "sha256-ThWG6fCTNKi7gRIovF7MWuVh/t/1+HyQe07gGg0iceo=";
+            hash = "sha256-V1drtD9cRfclkAgQ21XrjHZiOKaGTFoaT57fmwaW6Bk=";
           };
         in
         pkgs.buildNpmPackage rec {
           pname = "pi-coding-agent";
-          version = "0.78.1-unstable-2026-06-08";
+          version = "0.80.2-unstable-2026-06-25";
 
           src = self;
           nodejs = pkgs.nodejs_24;
-          npmDepsHash = "sha256-AkF+s9CjTbxWzkzfU83R+R9mTfNTbJCzJnP3XcOtKuw=";
+          npmDepsHash = "sha256-EliYk4ONCl3is+zsmwtiA+u++qu+U570nk9VFtkaetA=";
           makeCacheWritable = true;
 
           postPatch = ''
