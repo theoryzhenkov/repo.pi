@@ -3,7 +3,15 @@
 export { type Args, parseArgs } from "./cli/args.ts";
 
 // Config paths
-export { getAgentDir, getDocsPath, getExamplesPath, getPackageDir, getReadmePath, VERSION } from "./config.ts";
+export {
+	CONFIG_DIR_NAME,
+	getAgentDir,
+	getDocsPath,
+	getExamplesPath,
+	getPackageDir,
+	getReadmePath,
+	VERSION,
+} from "./config.ts";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -103,6 +111,7 @@ export type {
 	MessageRenderOptions,
 	ProjectTrustContext,
 	ProjectTrustEvent,
+	ProjectTrustEventDecision,
 	ProjectTrustEventResult,
 	ProjectTrustHandler,
 	ProviderConfig,
@@ -222,6 +231,7 @@ export {
 } from "./core/session-manager.ts";
 export {
 	type CompactionSettings,
+	type DefaultProjectTrust,
 	type ImageSettings,
 	type PackageSource,
 	type RetrySettings,
@@ -239,6 +249,7 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
 // Tools
 export {
 	type BashOperations,
@@ -289,7 +300,13 @@ export {
 	type WriteToolOptions,
 	withFileMutationQueue,
 } from "./core/tools/index.ts";
-export { hasProjectTrustInputs, type ProjectTrustDecision, ProjectTrustStore } from "./core/trust-manager.ts";
+export {
+	hasTrustRequiringProjectResources,
+	type ProjectTrustDecision,
+	ProjectTrustStore,
+	type ProjectTrustStoreEntry,
+	type ProjectTrustUpdate,
+} from "./core/trust-manager.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage

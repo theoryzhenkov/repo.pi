@@ -314,6 +314,8 @@ export interface ExtensionContext {
 	model: Model<any> | undefined;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
+	/** Whether project-local trust is active for this context. */
+	isProjectTrusted(): boolean;
 	/** The current abort signal, or undefined when the agent is not streaming. */
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
@@ -503,8 +505,10 @@ export interface ProjectTrustEvent {
 	cwd: string;
 }
 
+export type ProjectTrustEventDecision = "yes" | "no" | "undecided";
+
 export interface ProjectTrustEventResult {
-	trusted: boolean;
+	trusted: ProjectTrustEventDecision;
 	remember?: boolean;
 }
 
@@ -567,6 +571,10 @@ export interface SessionBeforeCompactEvent {
 	preparation: CompactionPreparation;
 	branchEntries: SessionEntry[];
 	customInstructions?: string;
+	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
+	reason: "manual" | "threshold" | "overflow";
+	/** True when the aborted turn is retried after this compaction (overflow recovery) */
+	willRetry: boolean;
 	signal: AbortSignal;
 }
 
@@ -575,6 +583,10 @@ export interface SessionCompactEvent {
 	type: "session_compact";
 	compactionEntry: CompactionEntry;
 	fromExtension: boolean;
+	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
+	reason: "manual" | "threshold" | "overflow";
+	/** True when the aborted turn is retried after this compaction (overflow recovery) */
+	willRetry: boolean;
 }
 
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
@@ -1526,6 +1538,7 @@ export interface ExtensionActions {
 export interface ExtensionContextActions {
 	getModel: () => Model<any> | undefined;
 	isIdle: () => boolean;
+	isProjectTrusted: () => boolean;
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;

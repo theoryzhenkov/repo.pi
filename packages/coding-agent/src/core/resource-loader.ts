@@ -9,7 +9,12 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
-import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
+import {
+	clearExtensionCache,
+	createExtensionRuntime,
+	loadExtensionFromFactory,
+	loadExtensionsCached,
+} from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
 import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
@@ -79,7 +84,6 @@ function loadContextFileFromDir(dir: string): { path: string; content: string } 
 export function loadProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
-	projectTrusted?: boolean;
 }): Array<{ path: string; content: string }> {
 	const resolvedCwd = resolvePath(options.cwd);
 	const resolvedAgentDir = resolvePath(options.agentDir);
@@ -93,28 +97,26 @@ export function loadProjectContextFiles(options: {
 		seenPaths.add(globalContext.path);
 	}
 
-	if (options.projectTrusted !== false) {
-		const ancestorContextFiles: Array<{ path: string; content: string }> = [];
+	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
 
-		let currentDir = resolvedCwd;
-		const root = resolve("/");
+	let currentDir = resolvedCwd;
+	const root = resolve("/");
 
-		while (true) {
-			const contextFile = loadContextFileFromDir(currentDir);
-			if (contextFile && !seenPaths.has(contextFile.path)) {
-				ancestorContextFiles.unshift(contextFile);
-				seenPaths.add(contextFile.path);
-			}
-
-			if (currentDir === root) break;
-
-			const parentDir = resolve(currentDir, "..");
-			if (parentDir === currentDir) break;
-			currentDir = parentDir;
+	while (true) {
+		const contextFile = loadContextFileFromDir(currentDir);
+		if (contextFile && !seenPaths.has(contextFile.path)) {
+			ancestorContextFiles.unshift(contextFile);
+			seenPaths.add(contextFile.path);
 		}
 
-		contextFiles.push(...ancestorContextFiles);
+		if (currentDir === root) break;
+
+		const parentDir = resolve(currentDir, "..");
+		if (parentDir === currentDir) break;
+		currentDir = parentDir;
 	}
+
+	contextFiles.push(...ancestorContextFiles);
 
 	return contextFiles;
 }
@@ -209,6 +211,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private extensionThemeSourceInfos: Map<string, SourceInfo>;
 	private lastPromptPaths: string[];
 	private lastThemePaths: string[];
+	private loaded: boolean;
 
 	constructor(options: DefaultResourceLoaderOptions) {
 		this.cwd = resolvePath(options.cwd);
@@ -255,6 +258,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.extensionThemeSourceInfos = new Map();
 		this.lastPromptPaths = [];
 		this.lastThemePaths = [];
+		this.loaded = false;
 	}
 
 	getExtensions(): LoadExtensionsResult {
@@ -325,14 +329,22 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 	}
 
+	async loadProjectTrustExtensions(): Promise<LoadExtensionsResult> {
+		// Force untrusted project settings for the bootstrap pass. This keeps project-local
+		// extensions/packages out while still loading user/global and temporary CLI extensions.
+		this.settingsManager.setProjectTrusted(false);
+		await this.settingsManager.reload();
+		return this.loadCurrentExtensionSet({ includeInlineFactories: true });
+	}
+
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
+		if (this.loaded) {
+			clearExtensionCache();
+		}
+
 		let preTrustExtensions: LoadExtensionsResult | undefined;
 		if (options?.resolveProjectTrust) {
-			// Force untrusted project settings for the bootstrap pass. This keeps project-local
-			// extensions/packages out while still loading user/global and temporary CLI extensions.
-			this.settingsManager.setProjectTrusted(false);
-			await this.settingsManager.reload();
-			preTrustExtensions = await this.loadCurrentExtensionSet({ includeInlineFactories: true });
+			preTrustExtensions = await this.loadProjectTrustExtensions();
 			const projectTrusted = await options.resolveProjectTrust({ extensionsResult: preTrustExtensions });
 			this.settingsManager.setProjectTrusted(projectTrusted);
 		}
@@ -454,7 +466,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 				: loadProjectContextFiles({
 						cwd: this.cwd,
 						agentDir: this.agentDir,
-						projectTrusted: this.settingsManager.isProjectTrusted(),
 					}),
 		};
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
@@ -475,6 +486,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.appendSystemPrompt = this.appendSystemPromptOverride
 			? this.appendSystemPromptOverride(baseAppend)
 			: baseAppend;
+		this.loaded = true;
 	}
 
 	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {
@@ -487,7 +499,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const extensionPaths = this.noExtensions
 			? cliEnabledExtensions
 			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
-		const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
+		const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
 		if (!options.includeInlineFactories) {
 			return extensionsResult;
 		}
@@ -507,7 +519,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		preTrustExtensions: LoadExtensionsResult | undefined,
 	): Promise<LoadExtensionsResult> {
 		if (!preTrustExtensions) {
-			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
+			const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
 			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
 			extensionsResult.extensions.push(...inlineExtensions.extensions);
 			extensionsResult.errors.push(...inlineExtensions.errors);
@@ -527,7 +539,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const resolvedPath = this.resolveExtensionLoadPath(path);
 			return !preloadedByPath.has(resolvedPath) && !failedPreloadPaths.has(resolvedPath);
 		});
-		const remainingExtensions = await loadExtensions(
+		const remainingExtensions = await loadExtensionsCached(
 			remainingPaths,
 			this.cwd,
 			this.eventBus,

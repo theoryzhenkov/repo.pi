@@ -199,7 +199,7 @@ Project skill`,
 				join(userExtDir, "user.ts"),
 				`globalThis[${JSON.stringify(loadCountKey)}] = (globalThis[${JSON.stringify(loadCountKey)}] ?? 0) + 1;
 export default function(pi) {
-	pi.on("project_trust", () => ({ trusted: true }));
+	pi.on("project_trust", () => ({ trusted: "yes" }));
 	pi.registerCommand("user-trust", {
 		description: "user trust",
 		handler: async () => {},
@@ -376,7 +376,7 @@ Content`,
 			expect(loader.getSystemPrompt()).toBe("You are a helpful assistant.");
 		});
 
-		it("should skip project resources when project is not trusted", async () => {
+		it("should skip project resources that require trust when project is not trusted", async () => {
 			const piDir = join(cwd, ".pi");
 			const extensionsDir = join(piDir, "extensions");
 			const skillDir = join(piDir, "skills", "project-skill");
@@ -414,7 +414,7 @@ Project skill content`,
 			expect(loader.getAgentsFiles().agentsFiles.some((file) => file.path === join(agentDir, "AGENTS.md"))).toBe(
 				true,
 			);
-			expect(loader.getAgentsFiles().agentsFiles.some((file) => file.path === join(cwd, "AGENTS.md"))).toBe(false);
+			expect(loader.getAgentsFiles().agentsFiles.some((file) => file.path === join(cwd, "AGENTS.md"))).toBe(true);
 			expect(loader.getExtensions().extensions).toHaveLength(0);
 			expect(loader.getExtensions().errors).toEqual([]);
 			expect(loader.getSkills().skills.some((skill) => skill.name === "project-skill")).toBe(false);
