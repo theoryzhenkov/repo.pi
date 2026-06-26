@@ -171,7 +171,7 @@ function packageIdentity(pkg: PackageSource): string {
 
 /** Merge two package arrays by identity: higher-priority packages win,
  * lower-priority packages not already present are appended. */
-function mergePackagesByIdentity(higher: PackageSource[], lower: PackageSource[]): PackageSource[] {
+export function mergePackagesByIdentity(higher: PackageSource[], lower: PackageSource[]): PackageSource[] {
 	const higherIdentities = new Set(higher.map(packageIdentity));
 	const lowerOnly = lower.filter((pkg) => !higherIdentities.has(packageIdentity(pkg)));
 	return [...higher, ...lowerOnly];

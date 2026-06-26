@@ -33,6 +33,7 @@ import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
+import { mergePackagesByIdentity } from "./settings-manager.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
@@ -897,13 +898,19 @@ export class DefaultPackageManager implements PackageManager {
 		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
+		const systemSettings = this.settingsManager.getSystemSettings();
 
 		// Collect all packages with scope (project first so cwd resources win collisions)
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
 		for (const pkg of projectSettings.packages ?? []) {
 			allPackages.push({ pkg, scope: "project" });
 		}
-		for (const pkg of globalSettings.packages ?? []) {
+		// System-managed packages load under the user scope, whose npm read roots
+		// include the read-only system package root. Merge by identity so a user
+		// override of a managed package collapses to one entry (system pin wins),
+		// matching SettingsManager.recomputeSettings.
+		const userPackages = mergePackagesByIdentity(systemSettings.packages ?? [], globalSettings.packages ?? []);
+		for (const pkg of userPackages) {
 			allPackages.push({ pkg, scope: "user" });
 		}
 

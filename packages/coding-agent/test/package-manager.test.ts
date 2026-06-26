@@ -303,6 +303,29 @@ Content`,
 			// Should NOT find helper.ts (not declared in manifest)
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "helper.ts"))).toBe(false);
 		});
+		it("should resolve packages declared only in the system settings layer", async () => {
+			// Stage a read-only system package root holding one npm package whose
+			// only declaration lives in the system settings layer (no user/project
+			// entry). This mirrors a distro-managed PI_SYSTEM_SETTINGS pin.
+			const systemRoot = join(tempDir, "system-packages", "node_modules");
+			const pkgDir = join(systemRoot, "sys-ext");
+			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
+			writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "sys-ext", version: "1.0.0" }));
+			const extPath = join(pkgDir, "extensions", "index.ts");
+			writeFileSync(extPath, "export default function() {}");
+			process.env.PI_SYSTEM_PACKAGE_ROOT = systemRoot;
+
+			const systemSettingsPath = join(tempDir, "system-settings.json");
+			writeFileSync(systemSettingsPath, JSON.stringify({ packages: ["npm:sys-ext"] }));
+
+			const sm = SettingsManager.inMemory({}, { systemSettingsPath });
+			const pm = new DefaultPackageManager({ cwd: tempDir, agentDir, settingsManager: sm });
+
+			const result = await pm.resolve();
+
+			expect(result.extensions.some((r) => r.path === extPath && r.enabled)).toBe(true);
+			expect(result.extensions.find((r) => r.path === extPath)?.metadata.scope).toBe("user");
+		});
 	});
 
 	describe("auto-discovered skill metadata", () => {
