@@ -5504,10 +5504,23 @@ export class InteractiveMode {
 		if (!projectCwd) {
 			throw new Error(`${command} path ${target} returned no path`);
 		}
+
+		let bridgeEnv: NodeJS.ProcessEnv | undefined;
+		try {
+			const { stdout: userStdout } = await execFileAsync(command, ["user", target], { cwd });
+			const targetUser = userStdout.trim();
+			if (targetUser) {
+				bridgeEnv = { ...process.env, HOME: `/home/${targetUser}` };
+			}
+		} catch {
+			// Leave bridgeEnv undefined; this only affects HOME for bridged commands.
+		}
+
 		return createStdioExecutionContext(projectCwd, {
 			command,
 			args: ["run", target, "--", "pi-bridge", "--stdio"],
 			cwd,
+			env: bridgeEnv,
 		});
 	}
 
