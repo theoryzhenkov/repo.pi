@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExecutionContext, ToolBackend, ToolBackendCapabilities } from "../src/core/execution-context.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
