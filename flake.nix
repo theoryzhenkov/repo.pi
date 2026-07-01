@@ -29,7 +29,7 @@
           runtimeNpmDeps = pkgs.fetchNpmDeps {
             src = runtimeSrc;
             name = "pi-coding-agent-runtime-npm-deps";
-            hash = "sha256-KlvHoonmS1SfemSutU9mtmfOZ1yfw/a9t8QAdtkwy1M=";
+            hash = "sha256-iylAC4WSC5dupQLTQ+lY1+Ce5Ex72Moq63X5su49HaM=";
           };
         in
         pkgs.buildNpmPackage rec {
