@@ -18,6 +18,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 	describe("codex-max (supports xhigh)", () => {
 		// Note: codex models only support the responses API, not chat completions
 		it("should work with openai-responses", async () => {
+			// @ts-expect-error upstream v0.82.0: model absent from models.dev openai catalog (self-clears when added)
 			const model = getModel("openai", "gpt-5.1-codex-max");
 			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
 			let hasThinking = false;

@@ -1,3 +1,4 @@
+import { uuidv7 } from "@earendil-works/pi-ai";
 import { complete, getModel } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -191,7 +192,10 @@ export default function (pi: ExtensionAPI) {
 				{
 					apiKey: auth.apiKey,
 					headers: auth.headers,
+					env: auth.env,
 					reasoningEffort: "high",
+					cacheRetention: "none",
+					sessionId: uuidv7(),
 				},
 			);
 
