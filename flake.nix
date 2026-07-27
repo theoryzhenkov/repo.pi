@@ -29,7 +29,7 @@
           runtimeNpmDeps = pkgs.fetchNpmDeps {
             src = runtimeSrc;
             name = "pi-coding-agent-runtime-npm-deps";
-            hash = "sha256-wwEMbowXETYfL2ZHKDCbNy06BKOhTiUcKY1LohutJ5Q=";
+            hash = "sha256-VxKHolb+bsn3BP4V87GNnKpSFwpqFs1Apigxhha82ak=";
           };
         in
         pkgs.buildNpmPackage rec {
@@ -74,6 +74,7 @@
             cp ${runtimeSrc}/package.json package.json
             cp ${runtimeSrc}/package-lock.json package-lock.json
             chmod u+w package.json package-lock.json
+            rm -f npm-shrinkwrap.json
             npm_config_cache="$TMPDIR/runtime-cache" npm install --offline --ignore-scripts --omit=dev --omit=optional
             popd
 
